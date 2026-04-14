@@ -1,0 +1,99 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="diagram-1">
+    <mxGraphModel dx="1520" dy="1121" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1200" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title-group" connectable="0" parent="1" style="group;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="83" width="1000" x="50" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="title-text" parent="title-group" style="text;html=1;resizable=1;points=[];autosize=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=30;fontStyle=1;fontFamily=Helvetica;" value="S3 Bucket Layout" vertex="1">
+          <mxGeometry height="42" width="800" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle-text" parent="title-group" style="text;html=1;resizable=0;points=[];autosize=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=16;fontFamily=Helvetica;" value="AQI Pipeline prefix structure in aqi-pipeline-bucket" vertex="1">
+          <mxGeometry height="25" width="800" x="5" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="title-separator" parent="title-group" style="line;strokeWidth=2;html=1;fontSize=14;strokeColor=#FF9900;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="10" width="990" x="5" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="users-container" parent="1" style="fillColor=#f5f5f5;strokeColor=#666666;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#333333;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1;perimeterSpacing=0;" value="Data Engineer" vertex="1">
+          <mxGeometry height="98" width="120" x="60" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="users-icon" parent="users-container" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#232F3D;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.users;fontFamily=Helvetica;" value="" vertex="1">
+          <mxGeometry height="48" width="48" x="36" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="firehose-group" parent="1" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Streaming" vertex="1">
+          <mxGeometry height="120" width="120" x="60" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="firehose-icon" parent="firehose-group" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.kinesis_data_firehose;fontFamily=Helvetica;shadow=1;" value="Data Firehose&lt;div&gt;&lt;i&gt;Workflow A&lt;/i&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="48" width="48" x="36" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="flink-group" parent="1" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Analytics" vertex="1">
+          <mxGeometry height="120" width="120" x="60" y="515" as="geometry" />
+        </mxCell>
+        <mxCell id="flink-icon" parent="flink-group" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.managed_service_for_apache_flink;fontFamily=Helvetica;shadow=1;" value="Apache Flink&lt;div&gt;&lt;i&gt;Workflow B&lt;/i&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="48" width="48" x="36" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="athena-group" parent="1" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Query" vertex="1">
+          <mxGeometry height="120" width="120" x="60" y="680" as="geometry" />
+        </mxCell>
+        <mxCell id="athena-icon" parent="athena-group" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.athena;fontFamily=Helvetica;shadow=1;" value="Amazon Athena&lt;div&gt;&lt;i&gt;query output&lt;/i&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="48" width="48" x="36" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="s3-bucket-boundary" parent="1" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=15;fontColor=#3F8624;fontFamily=Helvetica;strokeWidth=2;strokeColor=#3F8624;fillColor=#E8F5E90D;fillStyle=auto;dashed=0;container=0;pointerEvents=0;" value="&lt;div&gt;&lt;br&gt;&lt;/div&gt;aqi-pipeline-bucket  /  aqi_pipeline/" vertex="1">
+          <mxGeometry height="692" width="700" x="330" y="128" as="geometry" />
+        </mxCell>
+        <mxCell id="s3-bucket-icon" parent="1" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#3F8624;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;fontFamily=Helvetica;" value="Amazon S3" vertex="1">
+          <mxGeometry height="48" width="48" x="489" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="folder-source" parent="1" style="fillColor=#E8F5E9;strokeColor=#3F8624;rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fontStyle=0;fontSize=11;fontFamily=Helvetica;strokeWidth=1.5;spacingLeft=10;spacingTop=5;" value="&lt;b style=&quot;font-size: 13px; color: rgb(63, 134, 36);&quot;&gt;source_data/&lt;/b&gt;&lt;div&gt;&lt;font color=&quot;#3f8624&quot;&gt;&lt;span style=&quot;font-size: 13px;&quot;&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/span&gt;&lt;/font&gt;&lt;font style=&quot;font-size: 11px; color: rgb(51, 51, 51);&quot;&gt;&lt;i&gt;Upload AQI CSVs here&lt;/i&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(102, 102, 102);&quot;&gt;openaq_location_6946_measurment.csv&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="78" width="640" x="360" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="folder-raw" parent="1" style="fillColor=#FFF2E8;strokeColor=#ED7100;rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fontStyle=0;fontSize=11;fontFamily=Helvetica;strokeWidth=1.5;spacingLeft=10;spacingTop=5;" value="&lt;b style=&quot;font-size: 13px; color: rgb(237, 113, 0);&quot;&gt;rawingestion/&lt;/b&gt;&lt;div&gt;&lt;font color=&quot;#ed7100&quot;&gt;&lt;span style=&quot;font-size: 13px;&quot;&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/span&gt;&lt;/font&gt;&lt;font style=&quot;font-size: 11px; color: rgb(51, 51, 51);&quot;&gt;&lt;i&gt;Firehose writes raw JSON here (auto-partitioned)&lt;/i&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(102, 102, 102);&quot;&gt;YYYY/MM/DD/HH/AQI_Batch-1-*.json&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(102, 102, 102);&quot;&gt;Workflow A - untransformed archive&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="640" x="360" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="folder-flink" parent="1" style="fillColor=#FCE4EC;strokeColor=#E7157B;rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fontStyle=0;fontSize=11;fontFamily=Helvetica;strokeWidth=1.5;spacingLeft=10;spacingTop=5;" value="&lt;b style=&quot;font-size: 13px; color: rgb(231, 21, 123);&quot;&gt;flink_output/&lt;/b&gt;&lt;div&gt;&lt;font color=&quot;#e7157b&quot;&gt;&lt;span style=&quot;font-size: 13px;&quot;&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/span&gt;&lt;/font&gt;&lt;font style=&quot;font-size: 11px; color: rgb(51, 51, 51);&quot;&gt;&lt;i&gt;Workflow B - enriched output from Flink&lt;/i&gt;&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="130" width="640" x="360" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="folder-co-measurements" parent="1" style="fillColor=#E8F5E9;strokeColor=#3F8624;rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=middle;fontStyle=0;fontSize=11;fontFamily=Helvetica;strokeWidth=1;spacingLeft=10;" value="&lt;b style=&quot;font-size: 12px; color: #3F8624;&quot;&gt;co-measurements/&lt;/b&gt;  &lt;font style=&quot;font-size: 10px; color: #333333;&quot;&gt;&lt;i&gt;Flink writes enriched JSON here (+2 computed columns)&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="570" x="373" y="573" as="geometry" />
+        </mxCell>
+        <mxCell id="folder-athena" parent="1" style="fillColor=#E3F2FD;strokeColor=#1565C0;rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fontStyle=0;fontSize=11;fontFamily=Helvetica;strokeWidth=1.5;spacingLeft=10;spacingTop=5;" value="&lt;b style=&quot;font-size: 13px; color: rgb(21, 101, 192);&quot;&gt;athena-results/&lt;/b&gt;&lt;div&gt;&lt;font color=&quot;#1565c0&quot;&gt;&lt;span style=&quot;font-size: 13px;&quot;&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/span&gt;&lt;/font&gt;&lt;font style=&quot;font-size: 11px; color: rgb(51, 51, 51);&quot;&gt;&lt;i&gt;Athena stores query output here (both raw + enriched queries)&lt;/i&gt;&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="640" x="360" y="705" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-user-source" edge="1" parent="1" source="users-container" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;strokeWidth=2;strokeColor=#3F8624;" target="folder-source">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-user-source-label" connectable="0" parent="edge-user-source" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];labelBackgroundColor=none;fontFamily=Helvetica;fontSize=11;" value="uploads CSVs" vertex="1">
+          <mxGeometry relative="1" x="-0.2" as="geometry">
+            <mxPoint x="-3" y="10" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-firehose-raw" edge="1" parent="1" source="firehose-group" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;strokeWidth=2;strokeColor=#ED7100;" target="folder-raw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-firehose-raw-label" connectable="0" parent="edge-firehose-raw" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];labelBackgroundColor=none;fontFamily=Helvetica;fontSize=11;" value="writes JSON" vertex="1">
+          <mxGeometry relative="1" x="-0.2" as="geometry">
+            <mxPoint x="-15" y="11" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-flink-output" edge="1" parent="1" source="flink-group" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;strokeWidth=2;strokeColor=#E7157B;" target="folder-flink">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-flink-output-label" connectable="0" parent="edge-flink-output" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];labelBackgroundColor=none;fontFamily=Helvetica;fontSize=11;" value="writes enriched JSON" vertex="1">
+          <mxGeometry relative="1" x="-0.2" as="geometry">
+            <mxPoint x="-8" y="15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-athena-results" edge="1" parent="1" source="athena-group" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;strokeWidth=2;strokeColor=#1565C0;" target="folder-athena">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-athena-results-label" connectable="0" parent="edge-athena-results" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];labelBackgroundColor=none;fontFamily=Helvetica;fontSize=11;" value="stores query output" vertex="1">
+          <mxGeometry relative="1" x="-0.2" as="geometry">
+            <mxPoint x="-2" y="18" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
