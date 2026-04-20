@@ -17,5 +17,3 @@ __pycache__/
 venv/
 *.log
 .claude/
-real_time_aws_dbt_architecture/rootkey.csv
-real_time_aws_dbt_architecture/kafka_access.pem
