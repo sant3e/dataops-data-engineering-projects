@@ -1,5 +1,8 @@
 .DS_Store
 .bg-shell/
+.agents/
+.gsd/
+.claude/
 Thumbs.db
 *.swp
 *.swo
@@ -16,4 +19,3 @@ __pycache__/
 .venv/
 venv/
 *.log
-.claude/
