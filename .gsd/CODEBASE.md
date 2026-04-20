@@ -1,11 +1,10 @@
 # Codebase Map
 
-Generated: 2026-04-20T15:02:28Z | Files: 55 | Described: 0/55
-<!-- gsd:codebase-meta {"generatedAt":"2026-04-20T15:02:28Z","fingerprint":"ad17752a3be9c03ff543b109df29da4d83849149","fileCount":55,"truncated":false} -->
+Generated: 2026-04-20T15:38:01Z | Files: 54 | Described: 0/54
+<!-- gsd:codebase-meta {"generatedAt":"2026-04-20T15:38:01Z","fingerprint":"08262cfc6fe965758981f2d5a6f4a2d3efddeb7d","fileCount":54,"truncated":false} -->
 
 ### (root)/
 - `.gitignore`
-- `=`
 - `pipeline_documentation_style_guide.md`
 - `README.md`
 - `refactor_documentation_prompt.md`
