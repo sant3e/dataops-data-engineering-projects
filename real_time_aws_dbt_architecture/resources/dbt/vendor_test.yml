@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: total_revenue
+    description: "Aggregates total revenue by vendor using fact trip data and vendor dimension."
+    columns:
+      - name: vendor_id
+        description: "Unique identifier for the vendor (from dim_vendor)."
+        tests:
+          - not_null
+          - unique
+
+      - name: revenue
+        description: "Total revenue generated per vendor."
+        tests:
+          - not_null

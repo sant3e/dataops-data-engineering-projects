@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: taxi_source
+    database: awsdatacatalog
+    schema: athena-db
+    tables:
+      - name: dim_vendor
+        description: "Vendor dimension - maps vendor_id to surrogate vendor_key"
+      - name: dim_payment
+        description: "Payment dimension - maps payment_type to surrogate payment_key"
+      - name: dim_location
+        description: "Location dimension - maps pickup/dropoff city+location to surrogate location_key"
+      - name: facts
+        description: "Fact table - aggregated trip metrics by vendor, payment, location, and date"
