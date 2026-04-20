@@ -18,5 +18,3 @@ Real-time streaming pipeline that processes Air Quality Index data through two p
 End-to-end real-time pipeline that ingests NYC taxi ride data via Kafka, delivers to S3 through Firehose, transforms with Glue and EMR Serverless (star schema), catalogs with Athena, and models with dbt. Orchestrated by Step Functions and EventBridge.
 
 **Stack:** Python · Terraform · MSK · Kinesis Firehose · S3 · Glue · EMR Serverless · Athena · Step Functions · EventBridge · dbt · EC2
-
-**Docs:** [`docs/pipeline_guide_refactored.md`](real_time_aws_dbt_architecture/docs/pipeline_guide_refactored.md) — full setup guide with architecture diagrams, step-by-step console walkthrough, parameterized Terraform, and troubleshooting reference.

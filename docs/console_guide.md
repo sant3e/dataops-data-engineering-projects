@@ -1,1 +1,0 @@
-../real_time_aws_dbt_architecture/docs/console_guide.md
