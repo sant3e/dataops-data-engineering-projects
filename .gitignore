@@ -2,6 +2,7 @@
 .bg-shell/
 .agents/
 .gsd/
+.gsd-id
 .claude/
 Thumbs.db
 *.swp
