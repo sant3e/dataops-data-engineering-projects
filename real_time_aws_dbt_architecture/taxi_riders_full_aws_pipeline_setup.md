@@ -1,10 +1,7 @@
-# Video Tutorial Notes — Real-Time AWS Ride Data Pipeline
+# Real-Time AWS Ride Data Pipeline
 
-**Date:** 2026-04-15  
-**Status:** In progress  
 **Topic:** Building a real-time data pipeline on AWS for ride data (Uber-like service)
 
----
 
 ## Data Flow — How the Pipeline Works in Production
 
