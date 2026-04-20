@@ -1,13 +1,18 @@
 # Codebase Map
 
-Generated: 2026-04-20T15:19:01Z | Files: 45 | Described: 0/45
-<!-- gsd:codebase-meta {"generatedAt":"2026-04-20T15:19:01Z","fingerprint":"f1ac7f09238fc70128384964d90b2bc7b65f7129","fileCount":45,"truncated":false} -->
+Generated: 2026-04-20T15:02:28Z | Files: 55 | Described: 0/55
+<!-- gsd:codebase-meta {"generatedAt":"2026-04-20T15:02:28Z","fingerprint":"ad17752a3be9c03ff543b109df29da4d83849149","fileCount":55,"truncated":false} -->
 
 ### (root)/
 - `.gitignore`
+- `=`
 - `pipeline_documentation_style_guide.md`
 - `README.md`
 - `refactor_documentation_prompt.md`
+
+### docs/
+- `docs/console_guide.md`
+- `docs/pipeline_guide_refactored.md`
 
 ### etl_aws_snowflake/
 - `etl_aws_snowflake/aws_snowflake_pipeline_setup.md`
@@ -34,22 +39,33 @@ Generated: 2026-04-20T15:19:01Z | Files: 45 | Described: 0/45
 ### real_time_aws_dbt_architecture/
 - `real_time_aws_dbt_architecture/taxi_riders_full_aws_pipeline_setup.md`
 
-### real_time_aws_dbt_architecture/resources/
-- `real_time_aws_dbt_architecture/resources/airflow_dag_example.py`
-- `real_time_aws_dbt_architecture/resources/emr_spark_job.py`
-- `real_time_aws_dbt_architecture/resources/extract_realtime_api_data.py`
-- `real_time_aws_dbt_architecture/resources/extract_static_dimensions.py`
-- `real_time_aws_dbt_architecture/resources/kafka_producer.py`
-- `real_time_aws_dbt_architecture/resources/step_function_and_event_bridge_config.md`
+### real_time_aws_dbt_architecture/docs/
+- `real_time_aws_dbt_architecture/docs/console_guide.md`
+- `real_time_aws_dbt_architecture/docs/gap_analysis.md`
+- `real_time_aws_dbt_architecture/docs/pipeline_guide_refactored.md`
+- `real_time_aws_dbt_architecture/docs/section_1_architecture.md`
+- `real_time_aws_dbt_architecture/docs/terraform_section.md`
 
-### real_time_aws_dbt_architecture/resources/dbt/
-- `real_time_aws_dbt_architecture/resources/dbt/daily_avg_fare.sql`
-- `real_time_aws_dbt_architecture/resources/dbt/no_negative_revenue.sql`
-- `real_time_aws_dbt_architecture/resources/dbt/revenue_by_payment.sql`
-- `real_time_aws_dbt_architecture/resources/dbt/sources.yml`
-- `real_time_aws_dbt_architecture/resources/dbt/top_routes.sql`
-- `real_time_aws_dbt_architecture/resources/dbt/total_revenue.sql`
-- `real_time_aws_dbt_architecture/resources/dbt/vendor_test.yml`
+### real_time_aws_dbt_architecture/docs/dbt/
+- `real_time_aws_dbt_architecture/docs/dbt/daily_avg_fare.sql`
+- `real_time_aws_dbt_architecture/docs/dbt/no_negative_revenue.sql`
+- `real_time_aws_dbt_architecture/docs/dbt/revenue_by_payment.sql`
+- `real_time_aws_dbt_architecture/docs/dbt/sources.yml`
+- `real_time_aws_dbt_architecture/docs/dbt/top_routes.sql`
+- `real_time_aws_dbt_architecture/docs/dbt/total_revenue.sql`
+- `real_time_aws_dbt_architecture/docs/dbt/vendor_test.yml`
+
+### real_time_aws_dbt_architecture/docs/diagrams/
+- `real_time_aws_dbt_architecture/docs/diagrams/.gitkeep`
+- `real_time_aws_dbt_architecture/docs/diagrams/pipeline_architecture.drawio`
+
+### real_time_aws_dbt_architecture/docs/resources/
+- `real_time_aws_dbt_architecture/docs/resources/airflow_dag_example.py`
+- `real_time_aws_dbt_architecture/docs/resources/emr_spark_job.py`
+- `real_time_aws_dbt_architecture/docs/resources/extract_realtime_api_data.py`
+- `real_time_aws_dbt_architecture/docs/resources/extract_static_dimensions.py`
+- `real_time_aws_dbt_architecture/docs/resources/kafka_producer.py`
+- `real_time_aws_dbt_architecture/docs/resources/step_function_and_event_bridge_config.md`
 
 ### real_time_aws_pipeline/
 - `real_time_aws_pipeline/aqi_pipeline_setup.md`

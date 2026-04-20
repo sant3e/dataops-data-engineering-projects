@@ -147,7 +147,7 @@ def generate_green_taxi_data(trip_id):
     fare_amt = round(trip_dst * 2.5 + random.uniform(2.0, 10.0), 2)
     fare_amt = round(fare_amt * random.uniform(0.1, 0.25), 2) if random.random() < 0.8 else 0.0
     tolls_amt = round(random.uniform(0.0, 10.0), 2) if random.random() < 0.3 else 0.0
-    total_amt = fare_amt + fare_amt + tolls_amt
+    total_amt = fare_amt + tolls_amt
 
     # Timestamps
     pickup_time = base_time

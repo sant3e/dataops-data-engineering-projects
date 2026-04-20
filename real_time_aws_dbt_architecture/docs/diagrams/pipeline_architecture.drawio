@@ -1,0 +1,318 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.1 Chrome/142.0.7444.265 Electron/39.8.0 Safari/537.36" version="29.6.1">
+  <diagram name="Page-1" id="diagram-1">
+    <mxGraphModel dx="3600" dy="1400" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2200" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="1">
+          <mxGeometry height="83" width="1700" x="50" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="title-text" style="text;html=1;resizable=1;points=[];autosize=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=30;fontStyle=1;fontFamily=Helvetica;" value="Real-Time Ride Data Pipeline" vertex="1" parent="title-group">
+          <mxGeometry height="42" width="800" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle-text" style="text;html=1;resizable=0;points=[];autosize=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=16;fontFamily=Helvetica;" value="AWS Architecture" vertex="1" parent="title-group">
+          <mxGeometry height="25" width="400" x="5" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="title-separator" style="line;strokeWidth=2;html=1;fontSize=14;strokeColor=#FF9900;fontFamily=Helvetica;" value="" vertex="1" parent="title-group">
+          <mxGeometry height="10" width="1690" x="5" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="label-ingest" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontStyle=1;fontSize=13;fontFamily=Helvetica;fontColor=#232F3E;" value="INGEST" vertex="1" parent="1">
+          <mxGeometry x="80" y="140" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="label-deliver" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontStyle=1;fontSize=13;fontFamily=Helvetica;fontColor=#232F3E;" value="DELIVER" vertex="1" parent="1">
+          <mxGeometry x="460" y="140" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="label-clean" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontStyle=1;fontSize=13;fontFamily=Helvetica;fontColor=#232F3E;" value="CLEAN" vertex="1" parent="1">
+          <mxGeometry x="780" y="140" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="label-model" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontStyle=1;fontSize=13;fontFamily=Helvetica;fontColor=#232F3E;" value="MODEL" vertex="1" parent="1">
+          <mxGeometry x="1060" y="140" width="300" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="label-catalog" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontStyle=1;fontSize=13;fontFamily=Helvetica;fontColor=#232F3E;" value="CATALOG" vertex="1" parent="1">
+          <mxGeometry x="1420" y="340" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="label-query" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontStyle=1;fontSize=13;fontFamily=Helvetica;fontColor=#232F3E;" value="QUERY" vertex="1" parent="1">
+          <mxGeometry x="1480" y="540" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-ec2" style="fillColor=#FFF2E8;strokeColor=#ED7100;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#ED7100;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Compute" vertex="1" parent="1">
+          <mxGeometry x="80" y="170" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-ec2" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ec2;fontFamily=Helvetica;shadow=1;" value="EC2&lt;div&gt;&lt;i&gt;Kafka producer&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-ec2">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-msk" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Streaming" vertex="1" parent="1">
+          <mxGeometry x="260" y="170" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-msk" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.managed_streaming_for_kafka;fontFamily=Helvetica;shadow=1;" value="Amazon MSK&lt;div&gt;&lt;i&gt;Kafka cluster&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-msk">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-firehose" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Delivery" vertex="1" parent="1">
+          <mxGeometry x="460" y="170" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-firehose" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.kinesis_data_firehose;fontFamily=Helvetica;shadow=1;" value="Kinesis Firehose&lt;div&gt;&lt;i&gt;stream delivery&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-firehose">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-s3-raw" style="fillColor=#E8F5E9;strokeColor=#3F8624;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#3F8624;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Storage" vertex="1" parent="1">
+          <mxGeometry x="460" y="370" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-s3-raw" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#3F8624;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;fontFamily=Helvetica;shadow=1;" value="S3 (Raw)&lt;div&gt;&lt;i&gt;raw layer&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-s3-raw">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-glue" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="ETL" vertex="1" parent="1">
+          <mxGeometry x="780" y="170" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-glue" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.glue;fontFamily=Helvetica;shadow=1;" value="AWS Glue Job&lt;div&gt;&lt;i&gt;cleanse and normalize&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-glue">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-s3-refined" style="fillColor=#E8F5E9;strokeColor=#3F8624;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#3F8624;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Storage" vertex="1" parent="1">
+          <mxGeometry x="780" y="370" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-s3-refined" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#3F8624;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;fontFamily=Helvetica;shadow=1;" value="S3 (Refined)&lt;div&gt;&lt;i&gt;refined layer&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-s3-refined">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-stepfn" style="fillColor=#FCE4EC;strokeColor=#E7157B;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#E7157B;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Orchestration" vertex="1" parent="1">
+          <mxGeometry x="1060" y="170" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-stepfn" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#E7157B;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.step_functions;fontFamily=Helvetica;shadow=1;" value="Step Functions&lt;div&gt;&lt;i&gt;model orchestration&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-stepfn">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-emr" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Analytics" vertex="1" parent="1">
+          <mxGeometry x="1220" y="170" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-emr" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.emr;fontFamily=Helvetica;shadow=1;" value="EMR Serverless&lt;div&gt;&lt;i&gt;Spark modeling&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-emr">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-s3-biz" style="fillColor=#E8F5E9;strokeColor=#3F8624;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#3F8624;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Storage" vertex="1" parent="1">
+          <mxGeometry x="1140" y="370" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-s3-biz" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#3F8624;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;fontFamily=Helvetica;shadow=1;" value="S3 (Business)&lt;div&gt;&lt;i&gt;business layer&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-s3-biz">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-gluecat" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Data Catalog" vertex="1" parent="1">
+          <mxGeometry x="1420" y="370" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-gluecat" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.glue;fontFamily=Helvetica;shadow=1;" value="Glue Crawler&lt;div&gt;&lt;i&gt;+ Data Catalog&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-gluecat">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-athena" style="fillColor=#EDE7F6;strokeColor=#8C4FFF;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#8C4FFF;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Query" vertex="1" parent="1">
+          <mxGeometry x="1480" y="570" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-athena" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#8C4FFF;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.athena;fontFamily=Helvetica;shadow=1;" value="Amazon Athena&lt;div&gt;&lt;i&gt;ad-hoc queries&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-athena">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-group-ec2-dbt" style="fillColor=#FFF2E8;strokeColor=#ED7100;rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fontColor=#ED7100;fontFamily=Helvetica;container=1;collapsible=0;shadow=1;strokeWidth=1.5;" value="Compute" vertex="1" parent="1">
+          <mxGeometry x="1640" y="570" width="120" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc-ec2-dbt" style="sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[1,1,0],[0,0.25,0],[0,0.5,0],[0,0.75,0],[1,0.25,0],[1,0.5,0],[1,0.75,0]];outlineConnect=0;fontColor=#232F3E;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ec2;fontFamily=Helvetica;shadow=1;" value="EC2&lt;div&gt;&lt;i&gt;dbt host&lt;/i&gt;&lt;/div&gt;" vertex="1" parent="svc-group-ec2-dbt">
+          <mxGeometry x="36" y="30" width="48" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="badge-1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=16;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;align=center;verticalAlign=middle;labelBackgroundColor=none;" value="1" vertex="1" parent="1">
+          <mxGeometry x="214" y="216" width="28" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="badge-2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=16;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;align=center;verticalAlign=middle;labelBackgroundColor=none;" value="2" vertex="1" parent="1">
+          <mxGeometry x="414" y="216" width="28" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="badge-3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=16;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;align=center;verticalAlign=middle;labelBackgroundColor=none;" value="3" vertex="1" parent="1">
+          <mxGeometry x="654" y="416" width="28" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="badge-4" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=16;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;align=center;verticalAlign=middle;labelBackgroundColor=none;" value="4" vertex="1" parent="1">
+          <mxGeometry x="960" y="216" width="28" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="badge-5" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=16;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;align=center;verticalAlign=middle;labelBackgroundColor=none;" value="5" vertex="1" parent="1">
+          <mxGeometry x="1296" y="416" width="28" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="badge-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=16;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;align=center;verticalAlign=middle;labelBackgroundColor=none;" value="6" vertex="1" parent="1">
+          <mxGeometry x="1386" y="514" width="28" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-ec2-msk" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;" edge="1" parent="1" source="svc-group-ec2" target="svc-group-msk">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-ec2-msk-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="produces" connectable="0" vertex="1" parent="edge-ec2-msk">
+          <mxGeometry relative="1" x="-0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-msk-firehose" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;" edge="1" parent="1" source="svc-group-msk" target="svc-group-firehose">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-msk-firehose-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="streams" connectable="0" vertex="1" parent="edge-msk-firehose">
+          <mxGeometry relative="1" x="-0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-firehose-s3raw" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-firehose" target="svc-group-s3-raw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-firehose-s3raw-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="delivers" connectable="0" vertex="1" parent="edge-firehose-s3raw">
+          <mxGeometry relative="1" x="0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-s3raw-glue" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-s3-raw" target="svc-group-glue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="700" y="430" />
+              <mxPoint x="700" y="290" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-s3raw-glue-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="reads" connectable="0" vertex="1" parent="edge-s3raw-glue">
+          <mxGeometry relative="1" x="-0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-glue-s3ref" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-glue" target="svc-group-s3-refined">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-glue-s3ref-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="transforms" connectable="0" vertex="1" parent="edge-glue-s3ref">
+          <mxGeometry relative="1" x="0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-s3ref-stepfn" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-s3-refined" target="svc-group-stepfn">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="980" y="430" />
+              <mxPoint x="980" y="290" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-s3ref-stepfn-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="triggers" connectable="0" vertex="1" parent="edge-s3ref-stepfn">
+          <mxGeometry relative="1" x="-0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-stepfn-emr" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;" edge="1" parent="1" source="svc-group-stepfn" target="svc-group-emr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-stepfn-emr-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="orchestrates" connectable="0" vertex="1" parent="edge-stepfn-emr">
+          <mxGeometry relative="1" x="-0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-emr-s3biz" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-emr" target="svc-group-s3-biz">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="310" />
+              <mxPoint x="1200" y="370" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-emr-s3biz-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="writes" connectable="0" vertex="1" parent="edge-emr-s3biz">
+          <mxGeometry relative="1" x="0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-s3biz-gluecat" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;" edge="1" parent="1" source="svc-group-s3-biz" target="svc-group-gluecat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-s3biz-gluecat-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="crawls" connectable="0" vertex="1" parent="edge-s3biz-gluecat">
+          <mxGeometry relative="1" x="-0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-gluecat-athena" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-gluecat" target="svc-group-athena">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1450" y="530" />
+              <mxPoint x="1510" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-gluecat-athena-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="queries via" connectable="0" vertex="1" parent="edge-gluecat-athena">
+          <mxGeometry relative="1" x="-0.1" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-gluecat-ec2dbt" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;labelBackgroundColor=none;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="svc-group-gluecat" target="svc-group-ec2-dbt">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1510" y="530" />
+              <mxPoint x="1670" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-gluecat-ec2dbt-label" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontFamily=Helvetica;labelBackgroundColor=none;" value="queries via" connectable="0" vertex="1" parent="edge-gluecat-ec2dbt">
+          <mxGeometry relative="1" x="0.2" y="-15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="legend-outer" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="1">
+          <mxGeometry height="760" width="650" x="1830" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-bg" style="verticalLabelPosition=bottom;verticalAlign=top;html=1;shape=mxgraph.basic.rect;fillColor2=none;strokeWidth=1;size=20;indent=5;fillColor=#EDF3FF;strokeColor=#6c8ebf;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="760" width="650" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-title" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=18;fontStyle=1;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="Pipeline Steps" vertex="1" parent="legend-outer">
+          <mxGeometry height="30" width="300" x="20" y="14" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-1-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="90" width="610" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-1-badge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=22;labelBackgroundColor=none;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;" value="1" vertex="1" parent="legend-step-1-group">
+          <mxGeometry height="38" width="40" y="4" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-1-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;INGEST &amp;mdash; EC2 + MSK&lt;/b&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;EC2 Kafka producer captures ride events from GPS and app&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Amazon MSK Kafka cluster ingests and buffers event streams&lt;/span&gt;&lt;/div&gt;" vertex="1" parent="legend-step-1-group">
+          <mxGeometry height="90" width="558" x="52" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-2-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="90" width="610" x="20" y="148" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-2-badge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=22;labelBackgroundColor=none;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;" value="2" vertex="1" parent="legend-step-2-group">
+          <mxGeometry height="38" width="40" y="4" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-2-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;DELIVER &amp;mdash; Kinesis Firehose + S3 (Raw)&lt;/b&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Kinesis Data Firehose buffers and delivers records to S3&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Raw layer stores unprocessed ride events as Parquet&lt;/span&gt;&lt;/div&gt;" vertex="1" parent="legend-step-2-group">
+          <mxGeometry height="90" width="558" x="52" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-3-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="90" width="610" x="20" y="246" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-3-badge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=22;labelBackgroundColor=none;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;" value="3" vertex="1" parent="legend-step-3-group">
+          <mxGeometry height="38" width="40" y="4" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-3-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;CLEAN &amp;mdash; AWS Glue Job + S3 (Refined)&lt;/b&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Glue ETL job cleanses, deduplicates, and normalizes records&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Refined layer stores validated and enriched events&lt;/span&gt;&lt;/div&gt;" vertex="1" parent="legend-step-3-group">
+          <mxGeometry height="90" width="558" x="52" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-4-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="90" width="610" x="20" y="344" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-4-badge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=22;labelBackgroundColor=none;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;" value="4" vertex="1" parent="legend-step-4-group">
+          <mxGeometry height="38" width="40" y="4" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-4-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;MODEL &amp;mdash; Step Functions + EMR Serverless + S3 (Business)&lt;/b&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Step Functions orchestrates multi-step Spark modeling jobs on EMR&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Business layer stores dimensional models and aggregated metrics&lt;/span&gt;&lt;/div&gt;" vertex="1" parent="legend-step-4-group">
+          <mxGeometry height="90" width="558" x="52" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-5-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="90" width="610" x="20" y="442" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-5-badge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=22;labelBackgroundColor=none;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;" value="5" vertex="1" parent="legend-step-5-group">
+          <mxGeometry height="38" width="40" y="4" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-5-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;CATALOG &amp;mdash; Glue Crawler + Glue Data Catalog&lt;/b&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Glue Crawler discovers and registers new S3 partitions automatically&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Data Catalog stores table metadata and schema for all S3 layers&lt;/span&gt;&lt;/div&gt;" vertex="1" parent="legend-step-5-group">
+          <mxGeometry height="90" width="558" x="52" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-6-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="90" width="610" x="20" y="540" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-6-badge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007CBD;strokeColor=default;fontColor=#FFFFFF;fontStyle=1;fontSize=22;labelBackgroundColor=none;fontFamily=Helvetica;shadow=1;glass=0;strokeWidth=2;" value="6" vertex="1" parent="legend-step-6-group">
+          <mxGeometry height="38" width="40" y="4" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-step-6-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;QUERY &amp;mdash; Athena + EC2 (dbt host)&lt;/b&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;Amazon Athena runs serverless SQL analytics over catalogued S3 data&lt;/span&gt;&lt;/div&gt;&lt;div&gt;&lt;span style=&quot;color: #000000;&quot;&gt;&lt;b&gt;- &lt;/b&gt;EC2 dbt host runs dbt transformations against Athena and Glue Catalog&lt;/span&gt;&lt;/div&gt;" vertex="1" parent="legend-step-6-group">
+          <mxGeometry height="90" width="558" x="52" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-line-group" connectable="0" style="group;fontFamily=Helvetica;" value="" vertex="1" parent="legend-outer">
+          <mxGeometry height="100" width="610" x="20" y="645" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-line-bg" style="fillColor=#F5F5F5;strokeColor=#666666;rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;" value="" vertex="1" parent="legend-line-group">
+          <mxGeometry height="100" width="610" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-line-title" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=14;fontStyle=1;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="Line Styles" vertex="1" parent="legend-line-group">
+          <mxGeometry height="26" width="200" x="10" y="6" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-line-desc" style="text;html=1;align=left;verticalAlign=top;spacingTop=-4;fontSize=13;labelBackgroundColor=none;whiteSpace=wrap;fontFamily=Helvetica;" value="&lt;div&gt;&lt;b&gt;Solid horizontal arrow:&lt;/b&gt; Data flow between pipeline stages&lt;/div&gt;&lt;div&gt;&lt;b&gt;Vertical drop arrow:&lt;/b&gt; Write to S3 storage layer (down) or read from S3 (up)&lt;/div&gt;" vertex="1" parent="legend-line-group">
+          <mxGeometry height="60" width="590" x="10" y="32" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
