@@ -1,7 +1,8 @@
-# Real-Time AWS Ride Data Pipeline
+# Real-Time AWS Data Pipeline
 
-**Topic:** Building a real-time data pipeline on AWS for ride data (Uber-like service)
+**Topic:** Building a real-time data pipeline on AWS for riders data (Uber-like service)
 
+![Taxi ride pipeline architecture showing MSK Kafka, EC2 producer, Data Firehose, S3 raw/refined/business layers, Glue ETL, EMR Serverless Spark, Step Functions + EventBridge automation, Athena, and dbt](docs/diagrams/pipeline_architecture.svg)
 
 ## Data Flow — How the Pipeline Works in Production
 
@@ -22,7 +23,7 @@
                 → reads refined CSV
                 → builds star schema: 3 dimension tables + 1 fact table
                 → writes Parquet to S3: <bucket>/Business/processed/dimensions/ and facts/
-                → (production: partitioned by trip_date for efficient querying)
+                → fact_trips is partitioned by trip_date (Hive-style) for partition pruning in Athena
 
 5. CATALOG    AWS Glue Crawler runs after each EMR job
                 → scans Business/ Parquet files
@@ -45,7 +46,8 @@ ridestreamlakehouse-td/
 │       │   ├── dim_location/     (parquet)
 │       │   └── dim_payment/      (parquet)
 │       └── facts/
-│           └── fact_trips/       (parquet)
+│           └── fact_trips/
+│               └── trip_date=<YYYY-MM-DD>/   (parquet, one folder per date — Hive-style partition)
 ├── scripts/                                           ← PySpark scripts for EMR
 └── athena-results/                                    ← Athena query output
 ```
@@ -70,9 +72,51 @@ ridestreamlakehouse-td/
 | **Athena** | Serverless SQL query engine over Glue Catalog tables |
 | **dbt** | Builds analytical models on top of Athena (joins, aggregations) |
 
-> **Note:** Tutorial includes deployment/automation steps — TBD whether we follow those.
+&nbsp;
 
-> **💰 Cost note:** If following this tutorial on a personal AWS account, MSK Serverless charges ~$0.75/hour even when idle. Create MSK and EC2 when you're ready to work through Steps 1–7, then delete them once data is in S3. The remaining steps only need the S3 data.
+### Component-by-Component Walkthrough
+
+Here's what each service does in the pipeline, in the order data touches it.
+
+**EC2 (Kafka client + dbt client)** — An EC2 instance inside the same VPC as MSK acts as the Kafka client — it hosts the Kafka CLI tools for creating topics and testing produce/consume, and runs the Python producer script that generates 100 NYC Green Taxi ride events into the `realtimeridedata` topic. Later in the pipeline a second EC2 instance (or the same one) hosts dbt for building analytical models on top of Athena. Without EC2, you'd need another compute layer to talk to MSK over private networking and to run dbt.
+
+> **Note on the dbt instance:** The trainer provisions a separate EC2 for dbt to isolate Kafka vs analytics IAM scopes. In production, dbt usually runs through CI/CD (GitHub Actions, GitLab CI, AWS CodeBuild) or dbt Cloud — no persistent EC2. See Step 13 for alternatives.
+
+**MSK (Managed Streaming for Apache Kafka)** — MSK hosts the `realtimeridedata` Kafka topic that sits at the center of the pipeline: the producer writes to it, Firehose reads from it. MSK Serverless auto-scales, distributes brokers across availability zones for fault tolerance, and handles replication — you get a Kafka cluster without managing brokers, ZooKeeper, or capacity planning. Like any Kafka cluster, it decouples producers from consumers so either side can restart, scale, or fail without losing data.
+
+> **Why Kafka instead of Kinesis?** MSK is the right fit when your team already has Kafka expertise, when you need Kafka-specific features (consumer groups, compacted topics, Kafka Streams), or when you need portability across cloud providers. Kinesis Data Streams is typically simpler and cheaper for AWS-native workloads where Kafka compatibility isn't required.
+
+**Amazon Data Firehose** — Firehose is the managed Kafka consumer that bridges MSK and S3. It reads from the `realtimeridedata` topic, buffers records (5 MB or 5 minutes, whichever triggers first), and writes JSON files to the raw S3 layer with automatic time-based partitioning (`<YYYY>/<MM>/<DD>/<HH>/`). Firehose cannot transform data — it delivers exactly what it receives. Everything downstream reads from S3, not MSK.
+
+> **"Real-time" vs "micro-batch":** Firehose is near-real-time — records land in S3 within 5 minutes of reaching MSK. That's fine for a daily dimensional modelling pipeline but not for per-record latency guarantees. For true sub-second stream processing you'd run a Flink job on MSK directly instead of buffering through Firehose.
+
+**S3 (Simple Storage Service)** — S3 is the durable backbone that holds every pipeline layer: raw JSON from Firehose, refined CSV from Glue, the star-schema Parquet (dimensions + facts) from EMR, PySpark scripts for EMR, and Athena query results. See the [S3 Bucket Layout](#s3-bucket-layout) tree above for the full structure. S3 acts as both the staging layer between pipeline stages and the permanent analytical store that Athena queries directly.
+
+**AWS Glue — Visual ETL Job** — A Glue job runs the `RAW_TO_REFINED` transformation. Using the Visual ETL editor we chain three nodes: an S3 Source (reads raw JSON), a Change Schema transform (renames columns like `pickup_dt` → `pickup_datetime`, drops `airport_fee` and `event_time`), and a SQL Query transform (adds a `vendor_name` derived column). Glue generates the underlying PySpark script automatically — no code to maintain for simple column-level transforms. Output is CSV in `Refined/`.
+
+> **Why CSV for the refined layer?** The tutorial uses CSV because it's human-readable and easy to inspect. For production, Parquet is usually better — columnar compression shrinks files, predicate pushdown makes Athena queries faster, and schema evolution is more robust.
+
+**EMR Serverless (Spark)** — EMR Serverless is the dimensional modelling engine. A PySpark script reads the refined CSV, builds a **star schema** (three dimensions — `dim_vendor`, `dim_location`, `dim_payment` — plus one fact table `fact_trips`), and writes the result as Parquet to `Business/processed/`. EMR Serverless auto-provisions Spark compute, runs the job, and shuts down — you pay only for the resources used. Spark is the right tool here because dimensional modelling involves shuffle-heavy joins and surrogate-key generation that Glue's simpler transforms can't express cleanly.
+
+> **Why a star schema?** Star schemas separate descriptive attributes (vendor name, payment type, pickup location) from measurable metrics (total revenue, trip count). Queries are simple and fast — join fact to a few dimensions, filter on dimension attributes, aggregate the facts. This is the classic pattern for BI reporting and it's what downstream dbt models expect.
+
+**AWS Step Functions** — Step Functions orchestrates the EMR Spark job. The state machine has a single Task state that calls `emr-serverless:StartJobRun` with the right application ID, execution role, and Spark configuration. Step Functions handles retries, failure paths, and audit logs without you writing any orchestration code. In a larger pipeline you'd add pre-validation, post-verification, and notification states around the core job.
+
+> **Why not just schedule Spark directly?** You could schedule Spark via EventBridge → Lambda, but Step Functions gives you structured state machines — visual execution graphs, per-state retry/error handling, and an audit log of every run. For a one-step pipeline it's overkill; for a real workflow with validation, branching, and rollback, it's the right abstraction.
+
+**Amazon EventBridge** — EventBridge closes the automation loop. A rule watches S3 for `Object Created` events on the `Refined/` prefix. When the Glue ETL job writes refined data, S3 emits an event, EventBridge matches it, and fires the Step Function, which runs the EMR job. The full chain becomes: Glue writes → S3 event → EventBridge → Step Function → EMR writes Parquet. This is event-driven orchestration — no schedulers, no polling.
+
+> **Note on enabling S3 → EventBridge:** S3 does not send events to EventBridge by default. You must enable the "Send notifications to Amazon EventBridge" property on each bucket that should emit events. Easy to miss during setup.
+
+**AWS Glue Crawler + Data Catalog** — After EMR writes, a Glue Crawler scans the Parquet files in `Business/processed/`, infers the schema, and registers the dimension and fact tables in the Glue Data Catalog (`athena-db` database). The Data Catalog is the centralized metadata store — it tells Athena (and Redshift Spectrum, and EMR) "where is the data, and what does it look like" without each service managing its own metadata.
+
+> **Why a Crawler?** You could run `CREATE EXTERNAL TABLE` DDL in Athena manually. A Crawler auto-detects schema changes (new columns, type changes, new partitions) and keeps the catalog in sync without intervention. For evolving data it saves maintenance; for stable schemas explicit DDL gives more control.
+
+**Amazon Athena** — Athena is the serverless SQL engine over the Glue Catalog. You write SQL, Athena scans the Parquet files in S3 directly, and you pay per TB scanned (~$5/TB). No servers to provision, no data to load — just point at the catalog and query. Athena serves two roles here: the ad-hoc query interface for exploring the star schema, and the target database that dbt reads from and writes to.
+
+**dbt (data build tool)** — dbt is the transformation layer on top of Athena. Its source tables are the star schema in `athena-db` (created by EMR and registered by the Crawler). dbt reads these via `{{ source() }}` references and builds analytical models — joins between fact and dimension tables, revenue aggregations, top-N route rankings — writing the results to `athena-dbt-db`. dbt handles dependency ordering, tests (`not_null`, `unique`, custom SQL tests), documentation, and incremental builds. Unlike EMR, dbt doesn't extract or load data; it only transforms data already in the warehouse (the "T" in ELT).
+
+> **Note on dbt in production:** The tutorial runs dbt on an EC2 instance, which is fine for learning. In production dbt typically runs through CI/CD or dbt Cloud — no persistent infrastructure to manage. See Step 13 for alternatives.
 
 ---
 
@@ -102,9 +146,50 @@ Think of it as a phonebook — you call one number to get the directory of every
 
 ## Step 1: Create the MSK Cluster
 
-### What is MSK?
+### Create the Cluster
 
-**Amazon Managed Streaming for Apache Kafka (MSK)** is a fully managed Kafka service. You get a Kafka cluster without managing brokers, ZooKeeper, patching, or scaling. The **Serverless** variant auto-scales and you pay per data throughput — no need to choose broker instance types.
+1. **AWS Console** → search **MSK** → **Amazon MSK** → **Create cluster**
+2. **Creation method:** Custom create
+3. **Cluster name:** `MSK`
+4. **Cluster type:** Serverless
+5. Click **Next**
+6. **Networking:**
+   - **VPC:** Select your VPC (default VPC or the one created via Terraform)
+   - **Availability Zones:** Select 2 zones (e.g. `eu-north-1a`, `eu-north-1b`)
+   - **Subnets:** Select one subnet per AZ (auto-populated from the VPC)
+   - **Security group:** The default security group will be attached
+7. Click **Next** until **Create cluster** → **Create**
+8. Wait for status to change from **Creating** to **Active** (takes a few minutes)
+
+Or via CLI:
+```bash
+aws kafka create-cluster-v2 \
+  --cluster-name MSK \
+  --serverless 'VpcConfigs=[{SubnetIds=["<SUBNET_A>","<SUBNET_B>"],SecurityGroupIds=["<DEFAULT_SG_ID>"]}],ClientAuthentication={Sasl={Iam={Enabled=true}}}' \
+  --region <YOUR_REGION>
+
+# Poll cluster state until ACTIVE
+aws kafka list-clusters-v2 \
+  --cluster-name-filter MSK \
+  --region <YOUR_REGION> \
+  --query 'ClusterInfoList[0].{Name:ClusterName,State:State,Arn:ClusterArn}'
+```
+
+### Get the Bootstrap Server Endpoint
+
+Once the cluster is **Active**:
+
+1. Click on the cluster name → **View client information**
+2. Copy the **Bootstrap servers** endpoint (e.g. `boot-xxxxx.c2.kafka-serverless.<region>.amazonaws.com:9098`)
+3. **Save this** — you'll need it for every Kafka CLI command on the EC2 instance
+
+Or via CLI:
+```bash
+aws kafka get-bootstrap-brokers \
+  --cluster-arn <MSK_CLUSTER_ARN> \
+  --region <YOUR_REGION> \
+  --query 'BootstrapBrokerStringSaslIam'
+```
 
 ### Prerequisites: VPC and Networking
 
@@ -121,40 +206,13 @@ New AWS accounts come with a **default VPC** that has subnets in all AZs and a d
 
 #### If your account has no VPC (corporate/restricted account):
 
-You'll need to create VPC resources via Terraform (see [DevOps Request](#devops-request---terraform-resources) at the bottom).
-
-### Console Steps
-
-1. **AWS Console** → search **MSK** → **Amazon MSK** → **Create cluster**
-2. **Creation method:** Custom create
-3. **Cluster name:** `MSK`
-4. **Cluster type:** Serverless
-5. Click **Next**
-6. **Networking:**
-   - **VPC:** Select your VPC (default VPC or the one created via Terraform)
-   - **Availability Zones:** Select 2 zones (e.g. `eu-north-1a`, `eu-north-1b`)
-   - **Subnets:** Select one subnet per AZ (auto-populated from the VPC)
-   - **Security group:** The default security group will be attached
-7. Click **Next** until **Create cluster** → **Create**
-8. Wait for status to change from **Creating** to **Active** (takes a few minutes)
-
-### Get the Bootstrap Server Endpoint
-
-Once the cluster is **Active**:
-
-1. Click on the cluster name → **View client information**
-2. Copy the **Bootstrap servers** endpoint (e.g. `boot-xxxxx.c2.kafka-serverless.<region>.amazonaws.com:9098`)
-3. **Save this** — you'll need it for every Kafka CLI command on the EC2 instance
+You'll need to create VPC resources via Terraform (see [1. VPC + Networking](#1-vpc--networking) in the Terraform — All Resources section).
 
 ---
 
 ## Step 2: Create EC2 Instance (Kafka Client)
 
-### Why EC2?
-
-MSK doesn't have a built-in UI for managing topics or producing/consuming messages. We need a machine **inside the same VPC** that can talk to the MSK brokers over the private network. The EC2 instance acts as our **Kafka client** — we'll install Kafka CLI tools on it and use it to create topics, send test messages, and verify the cluster works.
-
-### Console Steps
+### Launch the Instance
 
 1. **AWS Console** → **EC2** → **Launch Instance**
 2. **Name:** `Kafka-Client` (or any name)
@@ -174,9 +232,41 @@ MSK doesn't have a built-in UI for managing topics or producing/consuming messag
 7. **Storage:** 8 GiB (default)
 8. Click **Launch instance**
 
-> **Note on key pair:** In a corporate environment where you lack `ec2:CreateKeyPair` permissions, this must be provisioned via Terraform. See [DevOps Request](#devops-request---terraform-resources).
+Or via CLI:
+```bash
+# 1. (First time only) Create the key pair and save the private key
+aws ec2 create-key-pair \
+  --key-name kafka_access \
+  --query 'KeyMaterial' --output text > kafka_access.pem
+chmod 400 kafka_access.pem
+
+# 2. Launch the EC2 instance (replace placeholders with your values)
+aws ec2 run-instances \
+  --image-id <AMAZON_LINUX_AMI_ID> \
+  --instance-type t3.micro \
+  --key-name kafka_access \
+  --subnet-id <SUBNET_ID> \
+  --security-group-ids <DEFAULT_SG_ID> \
+  --associate-public-ip-address \
+  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=8}' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=Kafka-Client}]' \
+  --region <YOUR_REGION>
+```
+
+> **Note on key pair:** In a corporate environment where you lack `ec2:CreateKeyPair` permissions, this must be provisioned via Terraform. See [2. EC2 Key Pair](#2-ec2-key-pair) in the Terraform — All Resources section.
 
 > **Note:** `0.0.0.0/0` means open to the world — fine for learning, not for production.
+
+### Connect to the Instance
+
+1. Go to **EC2** → Select your instance → **Connect**
+2. Select **EC2 Instance Connect** tab
+3. Click **Connect**
+4. This opens a browser-based terminal — no `.pem` file needed for this method
+
+### Why EC2?
+
+MSK doesn't have a built-in UI for managing topics or producing/consuming messages. We need a machine **inside the same VPC** that can talk to the MSK brokers over the private network. The EC2 instance acts as our **Kafka client** — we'll install Kafka CLI tools on it and use it to create topics, send test messages, and verify the cluster works.
 
 ### ⚠️ Critical: Security Group Configuration for MSK Access
 
@@ -199,13 +289,6 @@ aws ec2 modify-instance-attribute \
 ```
 
 > **How to find which security group MSK uses:** Go to **MSK** → click your cluster → **Networking** section → note the security group ID. Then add that same group to your EC2 instance.
-
-### Connect to the Instance
-
-1. Go to **EC2** → Select your instance → **Connect**
-2. Select **EC2 Instance Connect** tab
-3. Click **Connect**
-4. This opens a browser-based terminal — no `.pem` file needed for this method
 
 ---
 
@@ -260,23 +343,7 @@ pip install aws-msk-iam-sasl-signer-python
 
 ## Step 4: IAM Policy and Role for EC2 → MSK Access
 
-### Why?
-
-The EC2 instance needs **permission** to talk to the MSK cluster. AWS uses IAM roles to grant permissions to EC2 instances instead of storing credentials on the machine. We create a **policy** (what actions are allowed) and a **role** (who gets those permissions), then attach the role to the EC2 instance.
-
-### What is an IAM Policy?
-
-A JSON document that defines **what actions** are allowed on **which resources**. Our policy grants Kafka cluster operations: connect, create topics, read/write data, describe topics and consumer groups.
-
-### What is an IAM Role?
-
-An identity that AWS services can **assume** to get temporary credentials. Unlike a user (which has permanent credentials), a role is assumed by a service (like EC2) and gets short-lived tokens. The role has policies attached that define what it can do.
-
-### What is an Instance Profile?
-
-A wrapper around an IAM role that allows EC2 instances to assume it. When you attach a role to an EC2 instance via the Console, AWS creates an instance profile automatically behind the scenes. In Terraform, you must create it explicitly.
-
-### Console Steps
+### Create the Policy and Role
 
 1. **AWS Console** → **IAM** → **Policies** → **Create policy**
 2. Switch to **JSON** tab, paste:
@@ -327,7 +394,53 @@ A wrapper around an IAM role that allows EC2 instances to assume it. When you at
 13. Go to **EC2** → Select your instance → **Actions** → **Security** → **Modify IAM role**
 14. Select `Kafka_Cluster_Access` → **Update IAM role**
 
-> **Note:** In a corporate environment where you lack IAM permissions, the policy, role, and instance profile must be created via Terraform. See [DevOps Request](#devops-request---terraform-resources).
+Or via CLI (save the policy JSON above to `kafka-cluster-policy.json` first):
+```bash
+# 1. Create the policy
+aws iam create-policy \
+  --policy-name Access_to_Kafka_Cluster \
+  --policy-document file://kafka-cluster-policy.json
+
+# 2. Create the role with EC2 trust policy
+aws iam create-role \
+  --role-name Kafka_Cluster_Access \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+# 3. Attach the policy to the role
+aws iam attach-role-policy \
+  --role-name Kafka_Cluster_Access \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/Access_to_Kafka_Cluster
+
+# 4. Create an instance profile and add the role
+aws iam create-instance-profile --instance-profile-name Kafka_Cluster_Access
+aws iam add-role-to-instance-profile \
+  --instance-profile-name Kafka_Cluster_Access \
+  --role-name Kafka_Cluster_Access
+
+# 5. Attach the instance profile to the EC2 instance
+aws ec2 associate-iam-instance-profile \
+  --instance-id <INSTANCE_ID> \
+  --iam-instance-profile Name=Kafka_Cluster_Access \
+  --region <YOUR_REGION>
+```
+
+> **Note:** In a corporate environment where you lack IAM permissions, the policy, role, and instance profile must be created via Terraform. See [6. IAM — EC2 → MSK Access](#6-iam--ec2--msk-access) in the Terraform — All Resources section.
+
+### Why?
+
+The EC2 instance needs **permission** to talk to the MSK cluster. AWS uses IAM roles to grant permissions to EC2 instances instead of storing credentials on the machine. We create a **policy** (what actions are allowed) and a **role** (who gets those permissions), then attach the role to the EC2 instance.
+
+### What is an IAM Policy?
+
+A JSON document that defines **what actions** are allowed on **which resources**. Our policy grants Kafka cluster operations: connect, create topics, read/write data, describe topics and consumer groups.
+
+### What is an IAM Role?
+
+An identity that AWS services can **assume** to get temporary credentials. Unlike a user (which has permanent credentials), a role is assumed by a service (like EC2) and gets short-lived tokens. The role has policies attached that define what it can do.
+
+### What is an Instance Profile?
+
+A wrapper around an IAM role that allows EC2 instances to assume it. When you attach a role to an EC2 instance via the Console, AWS creates an instance profile automatically behind the scenes. In Terraform, you must create it explicitly.
 
 ---
 
@@ -396,15 +509,7 @@ This reads all messages from the topic from the beginning. `Ctrl+C` to exit.
 
 ## Step 6: Run the Kafka Producer Script
 
-### What this step does
-
-Instead of manually typing messages into the Kafka console producer, we run a Python script (`kafka_producer.py`) that generates 100 simulated NYC Green Taxi ride records and publishes them to the MSK topic. Each record is a JSON message containing trip details: pickup/dropoff locations, timestamps, fares, passenger count, payment type, etc.
-
-> **Note on data:** The script generates **randomized dummy data**, not real API data. For a real-data alternative, the NYC Taxi & Limousine Commission provides a free REST API (no auth required): `https://data.cityofnewyork.us/resource/gkne-dk5s.json?$limit=100`. See the script's docstring for details.
-
-> **Script reference:** `resources/kafka_producer.py` — fully commented with explanations of each section.
-
-### Steps
+### Run the Producer
 
 #### 1. Create the topic for the producer script
 
@@ -429,13 +534,7 @@ cd ~
 vi producer.py
 ```
 
-Paste the contents of `resources/kafka_producer.py` into the editor. **Before saving**, update these lines at the top of the script with your values:
-
-```python
-topicname = 'realtimeridedata'
-BROKERS = '<YOUR_BOOTSTRAP_SERVER>'  # e.g. 'boot-xxxxx.c2.kafka-serverless.eu-north-1.amazonaws.com:9098'
-region = '<YOUR_REGION>'             # e.g. 'eu-north-1'
-```
+Paste the contents of [`docs/resources/kafka_producer.py`](docs/resources/kafka_producer.py) into the editor. **Before saving**, update `topicname`, `BROKERS`, and `region` at the top of the script with your values (topic name, MSK bootstrap endpoint, and AWS region).
 
 Save and exit vi (`:wq`).
 
@@ -470,23 +569,19 @@ cd ~/kafka_2.12-2.8.1/bin/
 
 You'll see all 100 JSON records scroll by. `Ctrl+C` when done.
 
+### What this step does
+
+Instead of manually typing messages into the Kafka console producer, we run a Python script (`kafka_producer.py`) that generates 100 simulated NYC Green Taxi ride records and publishes them to the MSK topic. Each record is a JSON message containing trip details: pickup/dropoff locations, timestamps, fares, passenger count, payment type, etc.
+
+> **Note on data:** The script generates **randomized dummy data**, not real API data. For a real-data alternative, the NYC Taxi & Limousine Commission provides a free REST API (no auth required): `https://data.cityofnewyork.us/resource/gkne-dk5s.json?$limit=100`. See the script's docstring for details.
+
+> **Script reference:** `docs/resources/kafka_producer.py` — fully commented with explanations of each section.
+
 ---
 
 ## Step 7: Create S3 Bucket and Firehose Stream (MSK → S3)
 
-### What this step does
-
-We create an **S3 bucket** to store all pipeline data and an **Amazon Data Firehose** stream that automatically reads messages from the MSK topic and writes them as JSON files to S3. This replaces the manual consumer — Firehose continuously consumes from Kafka and batches the data into files in S3.
-
-### What is Amazon Data Firehose?
-
-A fully managed service that captures, transforms, and delivers streaming data to destinations like S3, Redshift, or OpenSearch. In our pipeline, Firehose acts as a **managed Kafka consumer** — it reads from the MSK topic and writes the data as files into S3 without us having to manage any infrastructure.
-
-### What is S3?
-
-**Amazon Simple Storage Service (S3)** is object storage — you store files (called "objects") in containers (called "buckets"). Unlike a filesystem with directories, S3 uses flat key-value storage where the key is the full path (e.g. `2026/04/16/11/MSK_Batch-1-...`). The "folders" you see in the Console are just key prefixes.
-
-### Console Steps
+### Create the Bucket and Firehose Stream
 
 #### 1. Create the S3 bucket
 
@@ -495,6 +590,11 @@ A fully managed service that captures, transforms, and delivers streaming data t
 3. **Region:** Same as your MSK cluster
 4. Leave all other settings as default → **Create bucket**
 
+Or via CLI:
+```bash
+aws s3 mb s3://<YOUR_BUCKET> --region <YOUR_REGION>
+```
+
 #### 2. Create folders for the pipeline layers
 
 Create these folders inside the bucket (S3 Console → **Create folder**):
@@ -502,6 +602,12 @@ Create these folders inside the bucket (S3 Console → **Create folder**):
 - `Business/`
 
 The raw layer folder (`<YYYY>/<MM>/<DD>/<HH>/`) is created automatically by Firehose.
+
+Or via CLI:
+```bash
+aws s3api put-object --bucket <YOUR_BUCKET> --key Refined/
+aws s3api put-object --bucket <YOUR_BUCKET> --key Business/
+```
 
 #### 3. Update MSK cluster policy for Firehose access
 
@@ -526,6 +632,22 @@ Before Firehose can read from MSK, the cluster must explicitly allow it:
 8. **S3 bucket:** Select the bucket you created
 9. Click **Create Firehose stream**
 10. Wait for status to change to **Active**
+
+Or via CLI (requires the MSK cluster policy to allow Firehose first — save the source and destination configs as JSON files):
+```bash
+aws firehose create-delivery-stream \
+  --delivery-stream-name MSK_Batch \
+  --delivery-stream-type MSKAsSource \
+  --msk-source-configuration file://msk-source-config.json \
+  --extended-s3-destination-configuration file://s3-destination-config.json \
+  --region <YOUR_REGION>
+
+# Poll until ACTIVE
+aws firehose describe-delivery-stream \
+  --delivery-stream-name MSK_Batch \
+  --region <YOUR_REGION> \
+  --query 'DeliveryStreamDescription.DeliveryStreamStatus'
+```
 
 > **Note:** If creation fails on the first attempt, try again — the IAM role Firehose needs gets auto-created on the first attempt but the stream creation itself may time out. The second attempt usually succeeds since the role already exists.
 
@@ -561,6 +683,10 @@ Wait ~5 minutes for Firehose to flush its buffer, then check S3:
 - Inside the hour folder: a file named `MSK_Batch-1-<timestamp>-<UUID>`
 - This file contains the raw JSON ride records (one JSON object per line, concatenated)
 
+### What this step does
+
+We create an **S3 bucket** to store all pipeline data and an **Amazon Data Firehose** stream that automatically reads messages from the MSK topic and writes them as JSON files to S3. This replaces the manual consumer — Firehose continuously consumes from Kafka and batches the data into files in S3.
+
 ### Buffering
 
 Firehose doesn't write every message individually to S3. It buffers data and flushes based on:
@@ -572,23 +698,6 @@ Whichever threshold is hit first triggers the write.
 ---
 
 ## Step 8: AWS Glue — Transform Raw Data to Refined
-
-### What this step does
-
-We use **AWS Glue Visual ETL** to read the raw JSON data from S3, rename columns to more descriptive names, drop unwanted fields, add a derived column, and write the result as CSV to the `Refined/` folder in the same bucket.
-
-### What is AWS Glue?
-
-A fully managed **ETL (Extract, Transform, Load)** service. Glue provides:
-- **Visual ETL editor** — drag-and-drop pipeline builder (no code required)
-- **Script editor** — write PySpark/Python code directly, full control over the transformation logic
-- **Notebook** — interactive Jupyter notebook for developing and testing PySpark code cell by cell, then converting to a job
-- **Data Catalog** — metadata store for table schemas (used later with Athena)
-- **Crawlers** — automatically discover data schemas in S3
-
-All three authoring options (Visual ETL, Script editor, Notebook) produce the same thing — a Glue job running PySpark. The Visual ETL generates the script for you automatically. For simple transforms like column renames and drops, Visual ETL is the fastest. For complex logic, the Script editor or Notebook gives full control.
-
-In this step we use the Visual ETL editor. Glue generates a PySpark script behind the scenes and stores it in an auto-created bucket (`aws-glue-assets-<account-id>-<region>`).
 
 ### IAM Role for Glue ETL
 
@@ -603,7 +712,7 @@ Glue needs an IAM role to read/write S3 and access the Glue service:
 4. **Role name:** `Glue_S3_msk_access`
 5. **Create role**
 
-### Console Steps — Visual ETL
+### Build the Visual ETL Job
 
 #### 1. Create the Glue job
 
@@ -704,40 +813,24 @@ After the job succeeds, the `Refined/` folder in your bucket will contain a CSV 
 | `congestion_surcharge` | double | Congestion surcharge |
 | `vendor_name` | string | Derived: Individual (vendor 1) or Group (vendor 2) |
 
+### What this step does
+
+We use **AWS Glue Visual ETL** to read the raw JSON data from S3, rename columns to more descriptive names, drop unwanted fields, add a derived column, and write the result as CSV to the `Refined/` folder in the same bucket.
+
+> **Why Visual ETL?** Glue offers three authoring options — Visual ETL editor, Script editor, and Notebook — all producing the same thing (a PySpark job). For simple column renames and drops, Visual ETL is fastest; for complex logic, the Script editor or Notebook gives full control. Under the hood, Glue generates the PySpark script and stores it in an auto-created bucket (`aws-glue-assets-<account-id>-<region>`).
+
 ---
 
 ## Step 9: EMR Serverless — Dimensional Modelling (Star Schema)
 
-### What this step does
-
-We run a PySpark script on **EMR Serverless** that reads the refined CSV data and builds a **star schema**: 3 dimension tables and 1 fact table. The output is written as Parquet files to the `Business/processed/` folder in S3.
-
-### What is EMR Serverless?
-
-**Amazon EMR (Elastic MapReduce) Serverless** lets you run big data frameworks (Spark, Hive) without managing clusters. You submit a job, EMR provisions the compute, runs it, and shuts down. You pay only for the resources used during the job.
-
-### What is a Star Schema?
-
-A dimensional modelling pattern where a central **fact table** (containing measurable metrics like revenue, trip count) references multiple **dimension tables** (containing descriptive attributes like vendor name, payment type, location). The "star" shape comes from the fact table at the center with dimensions radiating outward.
-
-Our star schema:
-- **dim_vendor** — vendor_id → vendor_key
-- **dim_payment** — payment_type → payment_key
-- **dim_location** — pickup/dropoff city+location → location_key
-- **fact_trips** — aggregated metrics keyed by vendor_key, payment_key, location_key, trip_date
-
-> **Script reference:** `resources/emr_spark_job.py` — fully commented with explanations of each block.
-
-> **⚠️ TODO (Production):** The fact table should be partitioned by `trip_date` using Hive-style partitioning (`partitionBy("trip_date")`) so that the Glue Crawler registers `trip_date` as a proper partition column and Athena can use partition pruning. The current script writes flat. If the trainer doesn't cover this in the automation section, revisit and add `.partitionBy("trip_date")` to the fact table write.
-
-### Console Steps
+### Run the Spark Job
 
 #### 1. Upload the PySpark script to S3
 
 The script must be in S3 for EMR to access it:
 
 - Create a `scripts/` folder in your bucket
-- Upload `resources/emr_spark_job.py` to `s3://<your-bucket>/scripts/emr_spark_job.py`
+- Upload `docs/resources/emr_spark_job.py` to `s3://<your-bucket>/scripts/emr_spark_job.py`
 
 Or via CLI:
 ```bash
@@ -788,8 +881,13 @@ Business/processed/
 │   ├── dim_location/     → _SUCCESS + .snappy.parquet
 │   └── dim_payment/      → _SUCCESS + .snappy.parquet
 └── facts/
-    └── fact_trips/       → _SUCCESS + .snappy.parquet
+    └── fact_trips/
+        ├── trip_date=2026-04-16/   → .snappy.parquet
+        ├── trip_date=2026-04-17/   → .snappy.parquet
+        └── _SUCCESS                ← success marker at the partition root
 ```
+
+> **Note on partitioned layout:** `partitionBy("trip_date")` in the Spark write produces one subfolder per distinct `trip_date` value. Each subfolder contains Parquet files for trips on that specific date. Athena uses the folder names directly (e.g. `WHERE trip_date = '2026-04-16'` reads only that subfolder), which is why partition pruning makes queries on large fact tables orders of magnitude cheaper.
 
 > **Note on folder names:** These are NOT created manually. The PySpark script creates them via the output paths in the code (e.g. `dim_output + "dim_vendor/"`). You control all folder names through the script's `dim_output` and `fact_output` variables.
 
@@ -801,25 +899,24 @@ After verifying the output, stop the application to avoid charges:
 
 **EMR Console** → **Serverless** → **Applications** → Select `EMR_ETL` → **Stop application**
 
+### What this step does
+
+We run a PySpark script on **EMR Serverless** that reads the refined CSV data and builds a **star schema**: 3 dimension tables and 1 fact table. The output is written as Parquet files to the `Business/processed/` folder in S3.
+
+### Our Star Schema
+
+- **dim_vendor** — vendor_id → vendor_key
+- **dim_payment** — payment_type → payment_key
+- **dim_location** — pickup/dropoff city+location → location_key
+- **fact_trips** — aggregated metrics keyed by vendor_key, payment_key, location_key, trip_date
+
+> **Script reference:** `docs/resources/emr_spark_job.py` — fully commented with explanations of each block.
+
+> **Partitioning:** The script writes `fact_trips` with `.partitionBy("trip_date")`, producing Hive-style folder structure (`fact_trips/trip_date=YYYY-MM-DD/...parquet`). The Glue Crawler registers `trip_date` as a proper partition column so Athena can use partition pruning (`WHERE trip_date = '2026-04-16'` scans only that one folder, not the full fact table).
+
 ---
 
 ## Step 10: Glue Crawler and Athena — Catalog and Query
-
-### What this step does
-
-We run a **Glue Crawler** to scan the Parquet files in `Business/processed/` and register them as tables in the **Glue Data Catalog**. Once cataloged, **Amazon Athena** can query them with standard SQL.
-
-### What is a Glue Crawler?
-
-A Crawler scans data in S3 (or other sources), infers the schema (column names, types), and creates/updates table definitions in the Glue Data Catalog. Think of it as an automated `CREATE TABLE` that figures out the columns by reading the actual data files.
-
-### What is the Glue Data Catalog?
-
-A centralized metadata store that holds table definitions (database, table name, columns, types, S3 location). Athena, Redshift Spectrum, and EMR all use it to know "where is the data and what does it look like" without each service needing its own metadata.
-
-### What is Amazon Athena?
-
-A serverless SQL query engine that reads data directly from S3 using table definitions from the Glue Data Catalog. You pay per query ($5 per TB scanned). No infrastructure to manage — just write SQL.
 
 ### IAM Role for the Crawler
 
@@ -833,7 +930,7 @@ Create a dedicated role for the crawler (separate from the Glue ETL role for pro
 4. **Role name:** `Glue_Crawler_Role`
 5. **Create role**
 
-### Console Steps
+### Create the Crawler and Query Data
 
 #### 1. Create a Glue database
 
@@ -853,6 +950,31 @@ Create a dedicated role for the crawler (separate from the Glue ETL role for pro
 6. Click **Create crawler**
 7. Click **Run crawler**
 8. Wait for it to complete — it will create 4 tables in `athena-db`
+
+Or via CLI:
+```bash
+# 1. Create Glue database
+aws glue create-database \
+  --database-input Name=athena-db \
+  --region <YOUR_REGION>
+
+# 2. Create the crawler
+aws glue create-crawler \
+  --name Business_Data_Crawler \
+  --role <CRAWLER_ROLE_ARN> \
+  --database-name athena-db \
+  --targets 'S3Targets=[{Path=s3://<YOUR_BUCKET>/Business/processed/}]' \
+  --region <YOUR_REGION>
+
+# 3. Run the crawler
+aws glue start-crawler --name Business_Data_Crawler --region <YOUR_REGION>
+
+# 4. Poll until READY (finished)
+aws glue get-crawler \
+  --name Business_Data_Crawler \
+  --region <YOUR_REGION> \
+  --query 'Crawler.State'
+```
 
 #### 3. Verify tables in Athena
 
@@ -878,32 +1000,17 @@ SELECT * FROM facts LIMIT 10;
 | `dim_location` | Many | Unique pickup/dropoff location combinations → surrogate key |
 | `facts` | Many | Aggregated trip metrics by vendor, payment, location, date |
 
-> **Note:** The `facts` table may contain a `partition_0` column with value `fact_trips`. This is because the Crawler interpreted the `fact_trips/` subfolder as a Hive partition. It's harmless and can be ignored in queries. To prevent this in production, either point the Crawler at each subfolder individually, or use Hive-style partitioning (`trip_date=YYYY-MM-DD/`) in the Spark output.
+> **Note on partition columns:** Because the Spark job writes `fact_trips` with `.partitionBy("trip_date")` (Hive-style `trip_date=YYYY-MM-DD/` subfolders), the Crawler registers `trip_date` as a real **partition column** in the Glue Catalog — it appears in the table schema as `partitionKey: trip_date (string)` rather than as a regular data column. Athena then uses partition pruning: a query like `WHERE trip_date = '2026-04-16'` reads only that one partition folder instead of scanning every file, cutting cost and latency dramatically as the fact table grows.
+
+> **Re-crawling after new data:** Each time the Spark job writes new `trip_date=...` subfolders, re-run the Crawler (or call `MSCK REPAIR TABLE facts;` in Athena) so the Glue Catalog picks up the new partitions. Without this, Athena won't know about the new dates.
+
+### What this step does
+
+We run a **Glue Crawler** to scan the Parquet files in `Business/processed/` and register them as tables in the **Glue Data Catalog**. Once cataloged, **Amazon Athena** can query them with standard SQL.
 
 ---
 
 ## Step 11: Step Functions — Automate the EMR Spark Job
-
-### What this step does
-
-We create an **AWS Step Functions state machine** that triggers the EMR Spark job on demand. Later (Step 12), we'll connect it to **EventBridge** so it runs automatically when new refined data lands in S3 — completing the automation chain.
-
-### What is AWS Step Functions?
-
-A serverless orchestration service that lets you coordinate multiple AWS services into workflows (called **state machines**). Each step in the workflow can call an AWS service (EMR, Glue, Lambda, etc.), handle errors, wait, branch, or retry. You define the flow visually or in JSON (Amazon States Language).
-
-In our pipeline, the state machine has a single step: `StartJobRun` — which submits the PySpark job to EMR Serverless.
-
-### What is a State Machine?
-
-A graph of **states** (steps) that execute in sequence or parallel. Each state has a type:
-- **Task** — calls an AWS service (what we use here)
-- **Choice** — branching logic
-- **Wait** — pause for a duration
-- **Pass** — passes input to output (useful for transformations)
-- **Succeed/Fail** — terminal states
-
-Our state machine is simple: one Task state that calls `emr-serverless:StartJobRun`.
 
 ### Prerequisites
 
@@ -926,7 +1033,7 @@ This role was auto-created when you first submitted a batch job in EMR Studio. I
 - **How to find it:** **IAM Console** → **Roles** → search `AmazonEMR-ExecutionRole` → copy the **ARN**
 - **Trust policy:** Must allow `emr-serverless.amazonaws.com` to assume it. If you recreated the EMR application after the role was originally created, the trust policy may reference the old application ID. Update the `aws:SourceArn` condition to use a wildcard (`/applications/*`) or the new application ID.
 
-### Console Steps
+### Build the State Machine
 
 #### 1. Create the State Machine
 
@@ -958,7 +1065,7 @@ This role was auto-created when you first submitted a batch job in EMR Studio. I
 }
 ```
 
-> **Template reference:** `resources/step_function_and_event_bridge_config.md` — contains this template with a table showing where to find each placeholder value.
+> **Template reference:** `docs/resources/step_function_and_event_bridge_config.md` — contains this template with a table showing where to find each placeholder value.
 
 #### 3. Create and Confirm
 
@@ -1012,6 +1119,37 @@ The Step Functions role should now have 4 policies:
 3. In the popup, click **Start execution** (no input needed)
 4. Watch the execution — the state should go from blue (running) to green (succeeded)
 
+Or via CLI (save the state machine definition above as `emr-automation.asl.json` and the PassRole policy as `passrole.json`):
+```bash
+# 1. Create Step Functions role
+aws iam create-role \
+  --role-name StepFunctions-EMR_Automation \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+# 2. Attach EMR full-access policy
+aws iam attach-role-policy \
+  --role-name StepFunctions-EMR_Automation \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEMRFullAccessPolicy_v2
+
+# 3. Attach the PassRole inline policy
+aws iam put-role-policy \
+  --role-name StepFunctions-EMR_Automation \
+  --policy-name PassRole \
+  --policy-document file://passrole.json
+
+# 4. Create the state machine
+aws stepfunctions create-state-machine \
+  --name EMR_Automation \
+  --definition file://emr-automation.asl.json \
+  --role-arn arn:aws:iam::<ACCOUNT_ID>:role/StepFunctions-EMR_Automation \
+  --region <YOUR_REGION>
+
+# 5. Start an execution
+aws stepfunctions start-execution \
+  --state-machine-arn <STATE_MACHINE_ARN> \
+  --region <YOUR_REGION>
+```
+
 #### 6. Verify the EMR Job Ran
 
 Via CLI:
@@ -1032,29 +1170,24 @@ Or check the `Business/processed/facts/fact_trips/` folder in S3 — the parquet
 | `Could not assume runtime role ... doesn't exist or isn't setup with the required trust relationship` | EMR execution role's trust policy references an old/deleted application ID | Update the trust policy: **IAM** → Roles → `AmazonEMR-ExecutionRole-...` → **Trust relationships** → **Edit** → change `aws:SourceArn` to `arn:aws:emr-serverless:<region>:<account-id>:/applications/*` |
 | Step Function succeeds but EMR job shows FAILED | The Step Function only confirms it submitted the job — check the EMR job status separately via CLI or Console |
 
+### What this step does
+
+We create an **AWS Step Functions state machine** that triggers the EMR Spark job on demand. Later (Step 12), we'll connect it to **EventBridge** so it runs automatically when new refined data lands in S3 — completing the automation chain. In our pipeline, the state machine has a single step: `StartJobRun` — which submits the PySpark job to EMR Serverless.
+
+### What is a State Machine?
+
+A graph of **states** (steps) that execute in sequence or parallel. Each state has a type:
+- **Task** — calls an AWS service (what we use here)
+- **Choice** — branching logic
+- **Wait** — pause for a duration
+- **Pass** — passes input to output (useful for transformations)
+- **Succeed/Fail** — terminal states
+
+Our state machine is simple: one Task state that calls `emr-serverless:StartJobRun`.
+
 ---
 
 ## Step 12: EventBridge — Automate the Full Pipeline
-
-### What this step does
-
-We create an **Amazon EventBridge rule** that watches for new files in the `Refined/` folder of our S3 bucket. When the Glue `RAW_TO_REFINED` job writes refined data, S3 emits an event. EventBridge catches it and automatically triggers the `EMR_Automation` Step Function, which runs the Spark dimensional modelling job. This completes the automation chain:
-
-```
-Glue writes to Refined/  →  S3 emits "Object Created" event
-  →  EventBridge matches the event  →  triggers Step Function
-    →  Step Function starts EMR Spark job  →  writes to Business/
-```
-
-### What is Amazon EventBridge?
-
-A serverless event bus that routes events between AWS services. Services like S3, EC2, and Glue emit events when things happen (file created, instance stopped, job completed). EventBridge lets you create **rules** that match specific events and route them to **targets** (Lambda, Step Functions, SNS, etc.).
-
-### What is an EventBridge Rule?
-
-A rule has two parts:
-- **Event pattern** — a JSON filter that describes which events to match (e.g. "S3 Object Created in bucket X with key prefix Y")
-- **Target** — what to invoke when the pattern matches (e.g. our Step Function)
 
 ### IAM Role for EventBridge
 
@@ -1082,7 +1215,7 @@ Create this role before setting up the rule:
 
 > **Why not auto-create?** The Console auto-creates a role with `AWSStepFunctionsFullAccess` — which allows invoking *any* state machine. The dedicated role above only allows invoking `EMR_Automation`.
 
-### Console Steps
+### Create the EventBridge Rule
 
 #### 1. Navigate to EventBridge
 
@@ -1129,7 +1262,7 @@ Replace `<YOUR_BUCKET>` with your bucket name (e.g. `ridestreamlakehouse-td`).
 | `detail.bucket.name` | Your bucket name | Only match events from this specific bucket |
 | `detail.object.key.prefix` | `Refined/` | Only match objects in the Refined folder — raw uploads and other files are ignored |
 
-> **Template reference:** `resources/step_function_and_event_bridge_config.md` — contains this pattern with placeholder table.
+> **Template reference:** `docs/resources/step_function_and_event_bridge_config.md` — contains this pattern with placeholder table.
 
 Click **Next**.
 
@@ -1144,6 +1277,32 @@ Click **Next**.
 #### 5. Review and Create
 
 Review the configuration and click **Create rule**.
+
+Or via CLI (save the event pattern above as `event-pattern.json` and the trust + invoke policy as `eventbridge-trust.json` / `invoke-sfn.json`):
+```bash
+# 1. Create EventBridge IAM role
+aws iam create-role \
+  --role-name EventBridge_StepFunction_Role \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"events.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+# 2. Attach inline policy allowing the role to start the state machine
+aws iam put-role-policy \
+  --role-name EventBridge_StepFunction_Role \
+  --policy-name InvokeStepFunction \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"states:StartExecution","Resource":"<STATE_MACHINE_ARN>"}]}'
+
+# 3. Create the rule
+aws events put-rule \
+  --name Refined_bucket_Upload \
+  --event-pattern file://event-pattern.json \
+  --region <YOUR_REGION>
+
+# 4. Wire the Step Function as the target
+aws events put-targets \
+  --rule Refined_bucket_Upload \
+  --targets 'Id=1,Arn=<STATE_MACHINE_ARN>,RoleArn=<EVENTBRIDGE_ROLE_ARN>' \
+  --region <YOUR_REGION>
+```
 
 #### 6. Enable EventBridge Notifications on the S3 Bucket
 
@@ -1178,45 +1337,27 @@ Verify by checking:
 - **Step Functions** → `EMR_Automation` → Executions tab for new execution
 - **S3** → `Business/processed/facts/fact_trips/` for fresh parquet file timestamp
 
+### What this step does
+
+We create an **Amazon EventBridge rule** that watches for new files in the `Refined/` folder of our S3 bucket. When the Glue `RAW_TO_REFINED` job writes refined data, S3 emits an event. EventBridge catches it and automatically triggers the `EMR_Automation` Step Function, which runs the Spark dimensional modelling job. This completes the automation chain:
+
+```
+Glue writes to Refined/  →  S3 emits "Object Created" event
+  →  EventBridge matches the event  →  triggers Step Function
+    →  Step Function starts EMR Spark job  →  writes to Business/
+```
+
+### What is an EventBridge Rule?
+
+A rule has two parts:
+- **Event pattern** — a JSON filter that describes which events to match (e.g. "S3 Object Created in bucket X with key prefix Y")
+- **Target** — what to invoke when the pattern matches (e.g. our Step Function)
+
 ---
 
 ## Step 13: EC2 Instance for dbt
 
-### What this step does
-
-We launch a new EC2 instance to install and run **dbt** (data build tool), which connects to **Amazon Athena** and builds analytical models on top of the star schema tables in the Glue Data Catalog.
-
-### What is dbt?
-
-**dbt (data build tool)** is an open-source transformation framework that lets you write SQL SELECT statements and dbt turns them into tables/views in your data warehouse. It handles dependency ordering, testing, documentation, and incremental builds. dbt doesn't extract or load data — it only transforms data that's already in the warehouse (the "T" in ELT).
-
-In this pipeline, dbt connects to Athena (via the Glue Data Catalog) and builds models that join dimension and fact tables, create aggregations, and produce final analytics-ready datasets.
-
-### Why a separate EC2 instance?
-
-The trainer uses a new EC2 instance for dbt rather than the original Kafka client instance. Considerations:
-
-| Approach | When to use |
-|---|---|
-| **Same EC2 for both** | Small pipelines, learning/dev environments. Both Kafka CLI and dbt are lightweight. Saves cost — one instance instead of two. |
-| **Separate EC2 instances** | When the Kafka client and dbt need different IAM roles (MSK access vs Athena/Glue access), different security groups, or independent scaling/restart. Cleaner separation of concerns. |
-| **No EC2 at all for dbt** | Production best practice. See alternatives below. |
-
-### Alternatives to EC2 for running dbt
-
-In production, a persistent EC2 instance for dbt is unnecessary overhead. Better options:
-
-| Alternative | How it works | Best for |
-|---|---|---|
-| **CI/CD pipeline** (GitHub Actions, GitLab CI, AWS CodeBuild) | dbt runs as a step in your deployment pipeline. Triggered on merge to main or on a schedule. No persistent infrastructure. | Teams with existing CI/CD. Most common production approach. |
-| **AWS CodeBuild** | Serverless build service. Define a `buildspec.yml` that installs dbt and runs `dbt run`. Triggered by EventBridge, CodePipeline, or manual. | AWS-native teams without external CI. |
-| **Docker container** (ECS Fargate, Lambda) | Package dbt in a container. Run on-demand via Fargate task or scheduled via EventBridge. | Teams using containerized workflows. |
-| **dbt Cloud** | Managed dbt service. Handles scheduling, environment management, docs hosting, and CI. | Teams that want zero infrastructure management for dbt. |
-| **Local machine** | Run `dbt run` from your laptop. Fine for development and testing. | Individual development. |
-
-> **Real-world note:** In many organizations, dbt runs against a different warehouse entirely (e.g. Snowflake, BigQuery) with its own repository and CI/CD. The AWS pipeline handles ingestion and initial transformation, then data is loaded into the analytics warehouse where dbt takes over. This tutorial demonstrates dbt on Athena to show that AWS can handle the full stack — but it's equally valid to stop the AWS pipeline at the Glue Catalog stage and hand off to Snowflake/dbt from there.
-
-### Console Steps
+### Launch the Instance
 
 Use the same configuration as the first EC2 instance (Step 2):
 
@@ -1312,44 +1453,35 @@ aws sts get-caller-identity
 
 Should return the `svc_dbt_athena` user ARN.
 
-### Terraform (corporate accounts)
+> **Terraform:** In a corporate environment where you lack IAM user creation permissions, the service user must be provisioned by your DevOps team. See [14. IAM Service User for dbt](#14-iam-service-user-for-dbt) in the Terraform — All Resources section.
 
-```hcl
-resource "aws_iam_user" "svc_dbt_athena" {
-  name = "svc_dbt_athena"
-  tags = { Name = "svc_dbt_athena" }
-}
+### What this step does
 
-resource "aws_iam_user_policy_attachment" "dbt_athena" {
-  user       = aws_iam_user.svc_dbt_athena.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonAthenaFullAccess"
-}
+We launch a new EC2 instance to install and run **dbt** (data build tool), which connects to **Amazon Athena** and builds analytical models on top of the star schema tables in the Glue Data Catalog.
 
-resource "aws_iam_user_policy_attachment" "dbt_glue" {
-  user       = aws_iam_user.svc_dbt_athena.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
-}
+### Why a separate EC2 instance?
 
-resource "aws_iam_user_policy_attachment" "dbt_s3" {
-  user       = aws_iam_user.svc_dbt_athena.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-}
+The trainer uses a new EC2 instance for dbt rather than the original Kafka client instance. Considerations:
 
-resource "aws_iam_access_key" "svc_dbt_athena_key" {
-  user = aws_iam_user.svc_dbt_athena.name
-}
+| Approach | When to use |
+|---|---|
+| **Same EC2 for both** | Small pipelines, learning/dev environments. Both Kafka CLI and dbt are lightweight. Saves cost — one instance instead of two. |
+| **Separate EC2 instances** | When the Kafka client and dbt need different IAM roles (MSK access vs Athena/Glue access), different security groups, or independent scaling/restart. Cleaner separation of concerns. |
+| **No EC2 at all for dbt** | Production best practice. See alternatives below. |
 
-output "svc_dbt_access_key" {
-  value = aws_iam_access_key.svc_dbt_athena_key.id
-}
+### Alternatives to EC2 for running dbt
 
-output "svc_dbt_secret_key" {
-  value     = aws_iam_access_key.svc_dbt_athena_key.secret
-  sensitive = true
-}
-```
+In production, a persistent EC2 instance for dbt is unnecessary overhead. Better options:
 
-> After `terraform apply`, retrieve the secret: `terraform output -raw svc_dbt_secret_key`
+| Alternative | How it works | Best for |
+|---|---|---|
+| **CI/CD pipeline** (GitHub Actions, GitLab CI, AWS CodeBuild) | dbt runs as a step in your deployment pipeline. Triggered on merge to main or on a schedule. No persistent infrastructure. | Teams with existing CI/CD. Most common production approach. |
+| **AWS CodeBuild** | Serverless build service. Define a `buildspec.yml` that installs dbt and runs `dbt run`. Triggered by EventBridge, CodePipeline, or manual. | AWS-native teams without external CI. |
+| **Docker container** (ECS Fargate, Lambda) | Package dbt in a container. Run on-demand via Fargate task or scheduled via EventBridge. | Teams using containerized workflows. |
+| **dbt Cloud** | Managed dbt service. Handles scheduling, environment management, docs hosting, and CI. | Teams that want zero infrastructure management for dbt. |
+| **Local machine** | Run `dbt run` from your laptop. Fine for development and testing. | Individual development. |
+
+> **Real-world note:** In many organizations, dbt runs against a different warehouse entirely (e.g. Snowflake, BigQuery) with its own repository and CI/CD. The AWS pipeline handles ingestion and initial transformation, then data is loaded into the analytics warehouse where dbt takes over. This tutorial demonstrates dbt on Athena to show that AWS can handle the full stack — but it's equally valid to stop the AWS pipeline at the Glue Catalog stage and hand off to Snowflake/dbt from there.
 
 ---
 
@@ -1461,28 +1593,7 @@ taxi_pipeline:
 
 The project files are in `~/dbt_athena/`.
 
-### Terraform (corporate accounts)
-
-```hcl
-resource "aws_s3_bucket" "dbt_bucket" {
-  bucket = "dbt-athena-<UNIQUE_SUFFIX>"
-  tags   = { Name = "dbt-athena-<UNIQUE_SUFFIX>" }
-}
-
-resource "aws_s3_object" "dbt_results_folder" {
-  bucket = aws_s3_bucket.dbt_bucket.id
-  key    = "results/"
-}
-
-resource "aws_s3_object" "dbt_data_folder" {
-  bucket = aws_s3_bucket.dbt_bucket.id
-  key    = "data/"
-}
-
-resource "aws_glue_catalog_database" "dbt_db" {
-  name = "athena-dbt-db"
-}
-```
+> **Terraform:** The dbt S3 bucket and its dedicated Glue database can be provisioned via Terraform. See [15. dbt S3 Bucket and Glue Database](#15-dbt-s3-bucket-and-glue-database) in the Terraform — All Resources section.
 
 ---
 
@@ -1517,34 +1628,14 @@ This decouples your SQL from hardcoded table names — if the underlying table n
 
 ### Create sources.yml
 
-Navigate to the models directory and create the file:
+Navigate to the models directory and create the file by copying the tracked version:
 
 ```bash
 cd ~/dbt_athena/models/
-vi sources.yml
+vi sources.yml   # paste the content from docs/dbt/sources.yml, then :wq
 ```
 
-Press `i` to enter insert mode, paste:
-
-```yaml
-version: 2
-
-sources:
-  - name: taxi_source
-    database: awsdatacatalog
-    schema: athena-db
-    tables:
-      - name: dim_vendor
-        description: "Vendor dimension - maps vendor_id to surrogate vendor_key"
-      - name: dim_payment
-        description: "Payment dimension - maps payment_type to surrogate payment_key"
-      - name: dim_location
-        description: "Location dimension - maps pickup/dropoff city+location to surrogate location_key"
-      - name: facts
-        description: "Fact table - aggregated trip metrics by vendor, payment, location, and date"
-```
-
-Press `Esc`, then type `:wq` and Enter to save and exit.
+The source definitions live in [`docs/dbt/sources.yml`](docs/dbt/sources.yml) — copy that file's content verbatim into the editor.
 
 **Field explanations:**
 
@@ -1590,70 +1681,18 @@ Each model is a `.sql` file in the `models/` directory. All models reference sou
 cd ~/dbt_athena/models/
 ```
 
-#### total_revenue.sql — Revenue by vendor
+Create each model file by copying the tracked version from `docs/dbt/`:
 
-```sql
-{{ config(materialized='table') }}
+| Model file | Purpose | Source |
+|---|---|---|
+| `total_revenue.sql` | Revenue by vendor | [`docs/dbt/total_revenue.sql`](docs/dbt/total_revenue.sql) |
+| `daily_avg_fare.sql` | Daily average fare trend | [`docs/dbt/daily_avg_fare.sql`](docs/dbt/daily_avg_fare.sql) |
+| `revenue_by_payment.sql` | Revenue by payment type | [`docs/dbt/revenue_by_payment.sql`](docs/dbt/revenue_by_payment.sql) |
+| `top_routes.sql` | Top 10 routes by revenue | [`docs/dbt/top_routes.sql`](docs/dbt/top_routes.sql) |
 
-SELECT
-    v.vendor_id,
-    SUM(f.total_revenue) AS revenue
-FROM {{ source('taxi_source', 'facts') }} f
-JOIN {{ source('taxi_source', 'dim_vendor') }} v
-    ON f.vendor_key = v.vendor_key
-GROUP BY v.vendor_id
-ORDER BY revenue DESC
-```
-
-#### daily_avg_fare.sql — Daily average fare trend
-
-```sql
-{{ config(materialized='table') }}
-
-SELECT
-    f.trip_date,
-    AVG(f.avg_fare) AS avg_daily_fare
-FROM {{ source('taxi_source', 'facts') }} f
-GROUP BY f.trip_date
-ORDER BY f.trip_date
-```
-
-#### revenue_by_payment.sql — Revenue by payment type
-
-```sql
-{{ config(materialized='table') }}
-
-SELECT
-    p.payment_type,
-    SUM(f.total_revenue) AS revenue
-FROM {{ source('taxi_source', 'facts') }} f
-JOIN {{ source('taxi_source', 'dim_payment') }} p
-    ON f.payment_key = p.payment_key
-GROUP BY p.payment_type
-ORDER BY revenue DESC
-```
-
-#### top_routes.sql — Top 10 routes by revenue
-
-```sql
-{{ config(materialized='table') }}
-
-SELECT
-    l.pickup_location,
-    l.dropoff_location,
-    SUM(f.total_revenue) AS revenue,
-    SUM(f.total_trips) AS trips
-FROM {{ source('taxi_source', 'facts') }} f
-JOIN {{ source('taxi_source', 'dim_location') }} l
-    ON f.location_key = l.location_key
-GROUP BY l.pickup_location, l.dropoff_location
-ORDER BY revenue DESC
-LIMIT 10
-```
+Each model uses `{{ source('taxi_source', 'table_name') }}` to reference the Glue Catalog tables defined in `sources.yml`, and starts with `{{ config(materialized='table') }}`.
 
 > **`{{ config(materialized='table') }}`** tells dbt to create a physical table in the target database (`athena-dbt-db`). The alternative is `materialized='view'` which creates a virtual view — faster to build but slower to query since it re-runs the SQL on every access.
-
-> **Script reference:** All model SQL is also documented in `resources/dbt/` with file-by-file headers.
 
 ### Run the Models
 
@@ -1715,38 +1754,13 @@ This custom SQL test checks that no fact rows have negative `total_revenue`. If 
 mkdir -p ~/dbt_athena/tests
 ```
 
-Create `~/dbt_athena/tests/no_negative_revenue.sql`:
-
-```sql
-SELECT *
-FROM {{ source('taxi_source', 'facts') }} f
-WHERE total_revenue < 0
-```
+Create `~/dbt_athena/tests/no_negative_revenue.sql` with the content from [`docs/dbt/no_negative_revenue.sql`](docs/dbt/no_negative_revenue.sql).
 
 ### Create Generic Tests — Vendor Model Validation
 
 Generic tests are defined in YAML alongside the models they test. They use built-in test types.
 
-Create `~/dbt_athena/models/vendor_test.yml`:
-
-```yaml
-version: 2
-
-models:
-  - name: total_revenue
-    description: "Aggregates total revenue by vendor using fact trip data and vendor dimension."
-    columns:
-      - name: vendor_id
-        description: "Unique identifier for the vendor (from dim_vendor)."
-        tests:
-          - not_null
-          - unique
-
-      - name: revenue
-        description: "Total revenue generated per vendor."
-        tests:
-          - not_null
-```
+Create `~/dbt_athena/models/vendor_test.yml` with the content from [`docs/dbt/vendor_test.yml`](docs/dbt/vendor_test.yml).
 
 **What each test does:**
 
@@ -1783,7 +1797,7 @@ dbt test --select no_negative_revenue
 dbt test --select total_revenue
 ```
 
-> **Test reference:** `resources/dbt/vendor_test.yml` documents both test types with explanations.
+> **Test reference:** `docs/dbt/vendor_test.yml` documents both test types with explanations.
 
 ---
 
@@ -1872,58 +1886,15 @@ dbt docs serve --host 0.0.0.0 --port 8080
 
 ---
 
-## Resources Reference
+## Terraform Reference
 
-### Scripts Used in the Pipeline
+This section provides a complete, copy-pasteable Terraform configuration that reproduces every AWS resource built through the console guide above. You can use it in two ways: **(a)** hand the entire file to your DevOps team so they can provision the pipeline in a repeatable, auditable manner, or **(b)** run it yourself in a sandbox account where you have admin rights, then point your team at the state file for production promotion.
 
-| File | Used in Step | Purpose |
-|---|---|---|
-| `resources/kafka_producer.py` | Step 6 | Python Kafka producer — generates 100 ride events and publishes to MSK |
-| `resources/emr_spark_job.py` | Step 9 | PySpark script — builds star schema (dims + facts) from refined data |
-| `resources/step_function_and_event_bridge_config.md` | Steps 11–12 | Template with placeholders for Step Functions arguments and EventBridge pattern |
-| `resources/airflow_dag_example.py` | — | Alternative to Step Functions: Airflow DAG for EMR orchestration (not used in tutorial) |
-| `resources/dbt/sources.yml` | Step 15 | dbt source definitions — maps Glue Catalog tables for `{{ source() }}` references |
-| `resources/dbt/total_revenue.sql` | Step 15 | dbt model: total revenue by vendor |
-| `resources/dbt/daily_avg_fare.sql` | Step 15 | dbt model: daily average fare trend |
-| `resources/dbt/revenue_by_payment.sql` | Step 15 | dbt model: revenue by payment type |
-| `resources/dbt/top_routes.sql` | Step 15 | dbt model: top 10 routes by revenue |
-| `resources/dbt/vendor_test.yml` | Step 16 | dbt generic tests (not_null, unique) for total_revenue model |
-| `resources/dbt/no_negative_revenue.sql` | Step 16 | dbt singular test: checks no negative revenue in facts |
+**DevOps handoff workflow:** Because the corporate AWS account restricts direct IAM and infrastructure creation, the recommended workflow is to commit these Terraform files to your team's infra repository, open a merge request tagged `pipeline-infra`, and let DevOps review, plan, and apply. IAM-related blocks are flagged below so reviewers know which resources require elevated privileges. All other resources (S3 objects, MSK cluster, EC2 instances, Glue jobs/crawlers, EMR Serverless, Step Functions, EventBridge) can typically be applied by a developer role with scoped permissions.
 
-### Reference Scripts (Not Used in Pipeline)
+> **Order matters:** Apply these resources in the order listed. Later resources reference earlier ones (e.g., the MSK cluster references the subnets and security group; the Step Functions state machine references the EMR execution role; EventBridge references the state machine). Terraform handles the dependency graph automatically, but if you apply blocks selectively, follow the ordering below.
 
-| File | Purpose |
-|---|---|
-| `resources/extract_realtime_api_data.py` | Pulls 100 real NYC taxi records from the free TLC API (`data.cityofnewyork.us`). Alternative to the dummy data generator for real-data testing. |
-| `resources/extract_static_dimensions.py` | Downloads NYC TLC reference data (zone lookup, rate codes, payment types, vendor names). Could be used as dbt seed data for richer dimension tables. |
-
-### Diagrams
-
-| File | Shows |
-|---|---|
-| `resources/architecture.png` | Overall pipeline architecture |
-| `resources/data_model.png` | Star schema data model (dims + facts) |
-| `resources/stepfunctions_graph.png` | Step Functions workflow |
-
----
-
-## Cleanup Note
-
-If following this tutorial on a personal/learning account, delete costly resources once you no longer need them:
-
-1. **Firehose stream** (`MSK_Batch`) — charges per GB ingested
-2. **MSK cluster** (`MSK`) — charges ~$0.75/hour even when idle
-3. **EC2 instance** — charges per hour when running
-4. **EMR Serverless application** (`EMR_ETL`) — charges while running; stop after job completes
-5. **EMR Studio** — delete when no longer needed
-
-The S3 bucket, Glue jobs/crawlers, IAM roles, Glue Catalog tables, and Athena are either free or negligible cost and can be left in place.
-
----
-
-## Terraform — All Resources
-
-> **This section contains Terraform for every resource in the pipeline.** On a personal account with full access, all resources can be created via the AWS Console using the steps above. In a corporate environment where the developer lacks permissions, provide these Terraform blocks to your DevOps/infrastructure team.
+Before any `resource` blocks, your `.tf` file needs the standard provider preamble. This tells Terraform which cloud provider plugins to download and which region to target:
 
 ### Provider
 
@@ -2529,5 +2500,71 @@ resource "aws_instance" "dbt_client" {
   }
 
   tags = { Name = "dbt-client" }
+}
+```
+
+### 14. IAM Service User for dbt
+
+Creates a dedicated IAM service user (`svc_dbt_athena`) with programmatic-only credentials for dbt to authenticate against Athena, Glue, and S3. Access keys are emitted as Terraform outputs — retrieve the secret once with `terraform output -raw svc_dbt_secret_key` and store it in the EC2 instance's `~/.aws/credentials` or inject into CI/CD secrets. Corresponds to **Step 13 — Configure AWS Credentials on the Instance**.
+
+```hcl
+resource "aws_iam_user" "svc_dbt_athena" {
+  name = "svc_dbt_athena"
+  tags = { Name = "svc_dbt_athena" }
+}
+
+resource "aws_iam_user_policy_attachment" "dbt_athena" {
+  user       = aws_iam_user.svc_dbt_athena.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonAthenaFullAccess"
+}
+
+resource "aws_iam_user_policy_attachment" "dbt_glue" {
+  user       = aws_iam_user.svc_dbt_athena.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
+}
+
+resource "aws_iam_user_policy_attachment" "dbt_s3" {
+  user       = aws_iam_user.svc_dbt_athena.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+}
+
+resource "aws_iam_access_key" "svc_dbt_athena_key" {
+  user = aws_iam_user.svc_dbt_athena.name
+}
+
+output "svc_dbt_access_key" {
+  value = aws_iam_access_key.svc_dbt_athena_key.id
+}
+
+output "svc_dbt_secret_key" {
+  value     = aws_iam_access_key.svc_dbt_athena_key.secret
+  sensitive = true
+}
+```
+
+> After `terraform apply`, retrieve the secret: `terraform output -raw svc_dbt_secret_key`
+
+### 15. dbt S3 Bucket and Glue Database
+
+Creates the dedicated S3 bucket that dbt uses for Athena query results (`results/`) and seed data (`data/`), plus the Glue database (`athena-dbt-db`) that dbt writes its models into. Keeping dbt outputs in a separate database from the raw star schema (`athena-db`) prevents dbt models from colliding with the Crawler-registered source tables. Corresponds to **Step 14 — Initialize the dbt Project** (the `s3_staging_dir`, `s3_data_dir`, and `schema` values in `profiles.yml` point at these resources).
+
+```hcl
+resource "aws_s3_bucket" "dbt_bucket" {
+  bucket = "dbt-athena-<UNIQUE_SUFFIX>"
+  tags   = { Name = "dbt-athena-<UNIQUE_SUFFIX>" }
+}
+
+resource "aws_s3_object" "dbt_results_folder" {
+  bucket = aws_s3_bucket.dbt_bucket.id
+  key    = "results/"
+}
+
+resource "aws_s3_object" "dbt_data_folder" {
+  bucket = aws_s3_bucket.dbt_bucket.id
+  key    = "data/"
+}
+
+resource "aws_glue_catalog_database" "dbt_db" {
+  name = "athena-dbt-db"
 }
 ```

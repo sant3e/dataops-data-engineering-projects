@@ -142,6 +142,11 @@ fact_trips = (
 
 # Write as Parquet — columnar format, compressed, fast for analytics queries.
 # mode("overwrite") replaces any existing data from previous runs.
-fact_trips.write.mode("overwrite").parquet(fact_output + "fact_trips/")
+# partitionBy("trip_date") creates Hive-style partitions — each date gets its own
+# subfolder (fact_trips/trip_date=2026-04-16/part-*.parquet). The Glue Crawler
+# registers `trip_date` as a real partition column, so Athena can use partition
+# pruning: a query with WHERE trip_date = '2026-04-16' scans only that one
+# folder instead of the whole fact table.
+fact_trips.write.mode("overwrite").partitionBy("trip_date").parquet(fact_output + "fact_trips/")
 
 print("Dimensions and facts with surrogate keys written to S3")

@@ -1,39 +1,94 @@
-<div align="center"><strong style="font-size:2em">Real-Time AQI Pipeline — Full Setup Guide</strong></div>
+# Real-Time AQI Pipeline
+
+**Topic:** Building a real-time data pipeline on AWS for Air Quality Index (AQI) data
+
+![AQI real-time pipeline architecture showing Lambda, Kinesis, Firehose, Flink, S3, Glue, Athena, CloudWatch, SNS, and Grafana — two parallel workflows](docs/diagrams/pipeline_architecture.svg)
 
 
 &nbsp;
 
-# Section 1: Real-Time AWS Pipeline — Architecture
+## Data Flow — How the Pipeline Works in Production
 
-![AQI real-time pipeline architecture showing Lambda, Kinesis, Firehose, Flink, S3, Glue, Athena, CloudWatch, SNS, and Grafana — two parallel workflows](diagrams/pipeline_architecture.svg)
+```
+1. INGEST     Lambda function (aqi_s3_to_kinesis) reads CSVs from S3
+                → source: <bucket>/aqi_pipeline/source_data/
+                → converts each CSV row to JSON
+                → publishes records to Kinesis Data Stream: AQI_Stream
 
-This pipeline ingests Air Quality Index (AQI) data and processes it in real-time using fully managed AWS services. Here's the end-to-end flow:
+              ── AQI_Stream forks into two parallel workflows ──
 
-> **Note on source data:** This pipeline does not include an API ingestion step — pulling live data from an external provider (e.g., the OpenAQ API) is out of scope. Instead, we start from pre-downloaded CSV files uploaded manually to S3. The pipeline picks up from there: Lambda reads the CSVs, converts them to JSON, and pushes records into Kinesis. If you later add an API pull, it would simply replace the manual upload step — everything downstream stays the same.
+Workflow A — Raw Archive
 
-&nbsp;
+2. DELIVER    Amazon Data Firehose (AQI_Batch, managed consumer) reads from AQI_Stream
+                → buffers for 60–900 s or 1–128 MB (whichever first)
+                → writes raw JSON to S3: <bucket>/aqi_pipeline/rawingestion/<YYYY>/<MM>/<DD>/<HH>/
 
-## Data Flow
+3. CATALOG    Glue Crawler (Raw_Crawler) scans rawingestion/
+                → discovers schema and registers table in Glue database: aqi_db
 
-1. **Source data** — AQI measurement CSVs (from OpenAQ) sit in S3 under `aqi-pipeline-bucket/aqi_pipeline/source_data/`
-2. **Ingestion** — A **Lambda function** (`aqi_s3_to_kinesis`) reads the CSVs, converts each row to JSON, and pushes records into **Kinesis Data Streams** (`AQI_Stream`). This decouples the data source from processing — producers and consumers don't need to know about each other
+Workflow B — Enrichment + Monitoring
 
-Once records are in `AQI_Stream`, the pipeline splits into **two parallel workflows**:
+4. ENRICH     Apache Flink (Studio Notebook) reads continuously from AQI_Stream
+                → adds computed columns: parameter_uppercase, value_in_fahrenheit
+                → writes enriched JSON to S3: <bucket>/aqi_pipeline/flink_output/co-measurements/
 
-**Workflow A — Raw Archive (Firehose)**
+5. AGGREGATE  Apache Flink runs a parallel windowed job on AQI_Stream
+                → counts records per 1-minute tumbling window
+                → writes counts to Kinesis Data Stream: AQI_Logs
 
-3. **Raw delivery** — **Amazon Data Firehose** (`AQI_Batch`) reads from `AQI_Stream` and delivers the raw JSON records to S3 (`rawingestion/`) in micro-batches. No transformation — just reliable delivery with automatic time-based partitioning (`year/month/day/hour/`)
-4. **Raw analytics** — A **Glue Crawler** (`Raw_Crawler`) scans the raw JSON files, registers the schema in `aqi_db`, enabling serverless SQL queries via **Athena**
+6. CATALOG    Glue Crawler (aqi_measurements_crawler) scans co-measurements/
+                → discovers schema and registers table in Glue database: aqi_pipeline_db
 
-**Workflow B — Analytical Processing (Flink)**
+7. MONITOR    Lambda (Logs_to_Cloud_Watch) is triggered by AQI_Logs
+                → writes each aggregate record to CloudWatch Logs
+                → publishes summary email via SNS
 
-5. **Real-time processing** — **Apache Flink** (via a Studio Notebook) continuously reads from `AQI_Stream` and runs two parallel jobs:
-   - **Enrichment** — adds 2 computed columns (`parameter_uppercase`, `value_in_fahrenheit`) and writes each enriched record as JSON to **S3** (`co-measurements/`)
-   - **Windowed aggregation** — counts records per 1-minute tumbling window and writes the count to a second Kinesis stream (`AQI_Logs`)
-6. **Analytical queries** — A **Glue Crawler** scans the enriched JSON files, registers the schema in `aqi_pipeline_db`, enabling serverless SQL queries via **Athena**
-7. **Monitoring & Visualization** — A second **Lambda function** (`Logs_to_Cloud_Watch`) is triggered by `AQI_Logs`, pushes each aggregate record to **CloudWatch Logs**, and sends an **SNS** email notification summarizing what was processed. **Amazon Managed Grafana** connects to CloudWatch and renders interactive dashboards — time-series charts of record counts, AQI trends, and processing health
+Analytics & Observability (shared consumption)
+
+8. QUERY      Amazon Athena queries tables through the Glue Data Catalog
+                → serverless SQL over aqi_db (raw) and aqi_pipeline_db (enriched)
+                → writes query results to S3: <bucket>/aqi_pipeline/athena-results/
+
+9. VISUALIZE  Amazon Managed Grafana connects to CloudWatch
+                → renders dashboards: record counts, AQI trends, processing health
+```
 
 **Why both?** Firehose gives you a zero-code archive of every raw record — useful for auditing, reprocessing, or feeding other systems that need untransformed data. Flink gives you enriched, queryable data and real-time monitoring. They serve different purposes and both consume from the same `AQI_Stream` independently.
+
+## S3 Bucket Layout
+
+```
+aqi-pipeline-bucket/
+└── aqi_pipeline/
+    ├── source_data/                                  ← AQI CSV files (uploaded manually from OpenAQ)
+    ├── rawingestion/<YYYY>/<MM>/<DD>/<HH>/           ← Raw JSON from Firehose (auto-partitioned by arrival time)
+    ├── flink_output/
+    │   └── co-measurements/                          ← Enriched JSON from Flink (adds parameter_uppercase, value_in_fahrenheit)
+    └── athena-results/                               ← Athena query output
+```
+
+> **Note on raw data path:** Firehose automatically creates the `<YYYY>/<MM>/<DD>/<HH>/` hierarchy based on arrival time. You do not create these folders manually.
+
+> **Note on bucket naming:** S3 bucket names are globally unique across all AWS accounts worldwide. If your chosen name (`aqi-pipeline-bucket`) is taken, append a suffix.
+
+&nbsp;
+
+## AWS Services Used
+
+| Service | Role in Pipeline |
+|---------|-----------------|
+| **S3** (`aqi-pipeline-bucket/aqi_pipeline/`) | Object storage for scalable data storage. Holds all pipeline data — source CSVs, raw archive, Flink output, and Athena results |
+| **Kinesis Data Streams** (`AQI_Stream`) | Real-time data streaming for high-throughput ingestion. Acts as the ingestion stream — receives records from the producer Lambda and decouples producers from consumers |
+| **Amazon Data Firehose** (`AQI_Batch`) | Fully managed service that loads streaming data into storage. Reads from `AQI_Stream` and delivers untransformed JSON to S3 in micro-batches for raw archival |
+| **Kinesis Data Streams** (`AQI_Logs`) | Second streaming channel dedicated to monitoring. Receives windowed aggregate counts from Flink and feeds them to the monitoring Lambda |
+| **Amazon Managed Service for Apache Flink** | Serverless stream processing engine. Runs a Studio Notebook with Flink SQL — reads from Kinesis, enriches data, and writes to S3 and Kinesis |
+| **Apache Zeppelin** | Notebook UI for writing and running Flink SQL interactively |
+| **AWS Glue** (Crawlers + Data Catalog) | Automatically discovers and catalogs data. Crawlers scan S3 files, infer schemas, and register them in the Glue Data Catalog — the central metadata repository that Athena reads from |
+| **Amazon Athena** | Serverless, interactive query service. Runs SQL directly against S3 files using Glue Catalog schemas — no infrastructure to manage, pay per query |
+| **AWS Lambda** | Serverless compute for event-driven tasks. Two functions: producer (reads CSV from S3, pushes JSON to Kinesis) and monitor (reads from `AQI_Logs`, writes to CloudWatch + SNS) |
+| **CloudWatch** | Monitoring and observability for AWS resources. Stores Flink aggregate records as structured log events and enables metric filters, alarms, and log-based analysis |
+| **SNS** | Pub/sub messaging for email notifications. Publishes Lambda execution summaries so you know the pipeline is alive without watching a dashboard |
+| **Amazon Managed Grafana** | Visualization layer for metrics and logs. Connects to CloudWatch and renders interactive dashboards — time-series charts, AQI distributions, and processing health |
 
 &nbsp;
 
@@ -41,9 +96,7 @@ Once records are in `AQI_Stream`, the pipeline splits into **two parallel workfl
 
 Here's what each service does in the pipeline, in the order data touches it.
 
-**S3 (Simple Storage Service)** — S3 is the object storage backbone of the entire pipeline. It holds everything — source CSVs, raw archives, enriched output, and query results. All data lives in a dedicated bucket (`aqi-pipeline-bucket`) organized under the `aqi_pipeline/` prefix:
-
-![S3 bucket prefix layout showing source_data, rawingestion, flink_output, and athena-results write paths](diagrams/s3_bucket_layout.svg)
+**S3 (Simple Storage Service)** — S3 is the object storage backbone of the entire pipeline. It holds everything — source CSVs, raw archives, enriched output, and query results. All data lives in a dedicated bucket (`aqi-pipeline-bucket`) organized under the `aqi_pipeline/` prefix (see the [S3 Bucket Layout](#s3-bucket-layout) tree above).
 
 S3 plays two distinct roles in the pipeline:
 
@@ -78,32 +131,13 @@ S3 plays two distinct roles in the pipeline:
 
 &nbsp;
 
-## AWS Services Used
-
-| Service | Role in Pipeline |
-|---------|-----------------|
-| **S3** (`aqi-pipeline-bucket/aqi_pipeline/`) | Object storage for scalable data storage. Holds all pipeline data — source CSVs, raw archive, Flink output, and Athena results |
-| **Kinesis Data Streams** (`AQI_Stream`) | Real-time data streaming for high-throughput ingestion. Acts as the ingestion stream — receives records from the producer Lambda and decouples producers from consumers |
-| **Amazon Data Firehose** (`AQI_Batch`) | Fully managed service that loads streaming data into storage. Reads from `AQI_Stream` and delivers untransformed JSON to S3 in micro-batches for raw archival |
-| **Kinesis Data Streams** (`AQI_Logs`) | Second streaming channel dedicated to monitoring. Receives windowed aggregate counts from Flink and feeds them to the monitoring Lambda |
-| **Amazon Managed Service for Apache Flink** | Serverless stream processing engine. Runs a Studio Notebook with Flink SQL — reads from Kinesis, enriches data, and writes to S3 and Kinesis |
-| **Apache Zeppelin** | Notebook UI for writing and running Flink SQL interactively |
-| **AWS Glue** (Crawlers + Data Catalog) | Automatically discovers and catalogs data. Crawlers scan S3 files, infer schemas, and register them in the Glue Data Catalog — the central metadata repository that Athena reads from |
-| **Amazon Athena** | Serverless, interactive query service. Runs SQL directly against S3 files using Glue Catalog schemas — no infrastructure to manage, pay per query |
-| **AWS Lambda** | Serverless compute for event-driven tasks. Two functions: producer (reads CSV from S3, pushes JSON to Kinesis) and monitor (reads from `AQI_Logs`, writes to CloudWatch + SNS) |
-| **CloudWatch** | Monitoring and observability for AWS resources. Stores Flink aggregate records as structured log events and enables metric filters, alarms, and log-based analysis |
-| **SNS** | Pub/sub messaging for email notifications. Publishes Lambda execution summaries so you know the pipeline is alive without watching a dashboard |
-| **Amazon Managed Grafana** | Visualization layer for metrics and logs. Connects to CloudWatch and renders interactive dashboards — time-series charts, AQI distributions, and processing health |
-
-&nbsp;
-
 ## Firehose vs Flink — Why We Use Both
 
 **Diagram 1: The Flink Workflow (Enrichment + Monitoring)**
 
 This is Workflow B — the analytical processing path. Flink reads from `AQI_Stream`, adds computed columns, writes enriched data to S3, and simultaneously produces aggregate counts that feed the monitoring chain (CloudWatch, SNS, Grafana).
 
-![The Flink Workflow — enrichment and monitoring](diagrams/what_we_learned_flink.svg)
+![The Flink Workflow — enrichment and monitoring](docs/diagrams/flink_architecture.svg)
 
 &nbsp;
 
@@ -111,17 +145,11 @@ This is Workflow B — the analytical processing path. Flink reads from `AQI_Str
 
 This is Workflow A — the raw archive path. Firehose reads from the same `AQI_Stream`, buffers records in micro-batches, and delivers them to S3 exactly as-is. Zero code, zero schemas, zero transformations. The raw data is then crawled by Glue and queryable via Athena.
 
-![The Firehose Workflow — zero-code raw delivery](diagrams/what_we_learned_firehose.svg)
+![The Firehose Workflow — zero-code raw delivery](docs/diagrams/firehose_pipeline.svg)
 
 &nbsp;
 
-# Section 2: Step-by-Step Console Guide
-
-This section walks you through creating every AWS resource in the pipeline using the browser console. Each phase builds on the previous one, and most steps include a link to the equivalent Terraform block in Section 3. Phases that involve interactive or manual verification steps note where no Terraform equivalent exists.
-
-&nbsp;
-
-## Phase 1: S3 Bucket + Folder Structure
+## Step 1: S3 Bucket + Folder Structure
 
 ### 1.1 — Create the S3 Bucket
 
@@ -130,7 +158,12 @@ This section walks you through creating every AWS resource in the pipeline using
 3. Region: **eu-west-2** (must match all other resources)
 4. Leave remaining settings as default → Click **Create bucket**
 
-> Terraform: [S3 Bucket](#terraform-s3-bucket)
+Or via CLI:
+```bash
+aws s3 mb s3://aqi-pipeline-bucket --region eu-west-2
+```
+
+> Terraform: [S3 Bucket](#1-s3-bucket)
 
 ### 1.2 — Create the Folder Prefixes
 
@@ -143,13 +176,25 @@ This section walks you through creating every AWS resource in the pipeline using
    - `aqi_pipeline/athena-results/`
 3. Upload your AQI CSV files to `source_data/`
 
+Or via CLI:
+```bash
+aws s3api put-object --bucket aqi-pipeline-bucket --key aqi_pipeline/source_data/
+aws s3api put-object --bucket aqi-pipeline-bucket --key aqi_pipeline/rawingestion/
+aws s3api put-object --bucket aqi-pipeline-bucket --key aqi_pipeline/flink_output/
+aws s3api put-object --bucket aqi-pipeline-bucket --key aqi_pipeline/flink_output/co-measurements/
+aws s3api put-object --bucket aqi-pipeline-bucket --key aqi_pipeline/athena-results/
+
+# Upload your CSV files to source_data/
+aws s3 cp <local-csv-path> s3://aqi-pipeline-bucket/aqi_pipeline/source_data/ --recursive
+```
+
 > **Mapping to tutorial buckets:** The tutorial creates three separate S3 buckets — `AQI DATA`, `rawingestion`, and `Analytical`. We replicate them as prefixes under `aqi_pipeline/`: `source_data/` = AQI DATA, `rawingestion/` = rawingestion, `flink_output/` = Analytical.
 
-> Terraform: [S3 Folder Prefixes](#terraform-s3-folder-prefixes)
+> Terraform: [S3 Folder Prefixes](#2-s3-folder-prefixes)
 
 &nbsp;
 
-## Phase 2: Kinesis Data Streams
+## Step 2: Kinesis Data Streams
 
 
 Two Kinesis Data Streams are needed:
@@ -166,9 +211,28 @@ Two Kinesis Data Streams are needed:
 3. Click **Create data stream**
 4. Repeat for stream name: `AQI_Logs`
 
+Or via CLI:
+```bash
+aws kinesis create-stream \
+  --stream-name AQI_Stream \
+  --stream-mode-details StreamMode=ON_DEMAND \
+  --region eu-west-2
+
+aws kinesis create-stream \
+  --stream-name AQI_Logs \
+  --stream-mode-details StreamMode=ON_DEMAND \
+  --region eu-west-2
+
+# Poll until ACTIVE
+aws kinesis describe-stream-summary \
+  --stream-name AQI_Stream \
+  --region eu-west-2 \
+  --query 'StreamDescriptionSummary.StreamStatus'
+```
+
 > **Note:** On-demand mode auto-provisions 4 shards. You can verify data later via **Data viewer** → select each shard → Starting position: **Trim horizon** → **Get records**.
 
-> Terraform: [Kinesis Data Streams](#terraform-kinesis-data-streams)
+> Terraform: [Kinesis Data Streams](#3-kinesis-data-streams)
 
 ### What is Kinesis Data Streams?
 
@@ -195,7 +259,7 @@ Lambda (producer)                          Firehose + Flink (consumers)
   pushes into AQI_Stream                     Both read from the same stream
 ```
 
-We create two Kinesis streams in this phase:
+We create two Kinesis streams in this step:
 
 - **`AQI_Stream`** — the ingestion stream. The Lambda producer pushes AQI records here; Firehose and Flink both read from it.
 - **`AQI_Logs`** — the monitoring stream. Flink writes aggregated output here (record counts per minute).
@@ -211,7 +275,7 @@ We create two Kinesis streams in this phase:
 
 &nbsp;
 
-## Phase 3: Load Data into Kinesis (Lambda Producer)
+## Step 3: Load Data into Kinesis (Lambda Producer)
 
 The tutorial runs a Python script locally to push CSV data from S3 into Kinesis. Since we can't connect locally (corporate SSO/VPN), we use a **Lambda function** instead — same logic, runs inside AWS with a dedicated execution role.
 
@@ -221,9 +285,55 @@ The tutorial runs a Python script locally to push CSV data from S3 into Kinesis.
 
 The Lambda function needs the `aqi_lambda_execution_role` IAM role — it grants scoped permissions to read from S3 (`source_data/*`), write to Kinesis (`AQI_Stream`), and emit CloudWatch Logs. This role is provisioned via Terraform before you create the function.
 
-> Terraform: [Lambda Execution Role](#terraform-lambda-execution-role)
+**Trust policy** — allows Lambda to assume this role:
 
-The original local script is at [`s3_to_kinesis.py`](resources/s3_to_kinesis.py) for reference. The Lambda-adapted version is [`s3_to_kinesis_lambda.py`](resources/s3_to_kinesis_lambda.py).
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": { "Service": "lambda.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+
+**Inline policy** (`lambda-aqi-producer-access`) — grants the runtime permissions:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3ReadSourceData",
+            "Effect": "Allow",
+            "Action": ["s3:GetObject", "s3:ListBucket"],
+            "Resource": [
+                aws_s3_bucket.pipeline_bucket.arn,
+                "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/source_data/*"
+            ]
+        },
+        {
+            "Sid": "KinesisWrite",
+            "Effect": "Allow",
+            "Action": ["kinesis:PutRecord", "kinesis:PutRecords"],
+            "Resource": aws_kinesis_stream.aqi_stream.arn
+        },
+        {
+            "Sid": "CloudWatchLogs",
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": "arn:aws:logs:*:*:*"
+        }
+    ]
+}
+```
+
+> Terraform: [Lambda Execution Role](#4-lambda-execution-role)
+
+The original local script is at [`s3_to_kinesis.py`](docs/resources/s3_to_kinesis.py) for reference. The Lambda-adapted version is [`s3_to_kinesis_lambda.py`](docs/resources/s3_to_kinesis_lambda.py).
 
 **Key differences from the local script:**
 
@@ -240,14 +350,31 @@ The original local script is at [`s3_to_kinesis.py`](resources/s3_to_kinesis.py)
 4. Runtime: **Python 3.12**
 5. Execution role: **Use an existing role** → select `aqi_lambda_execution_role`
 6. Click **Create function**
-7. In the code editor, **delete the default code** and paste the contents of [`s3_to_kinesis_lambda.py`](resources/s3_to_kinesis_lambda.py)
+7. In the code editor, **delete the default code** and paste the contents of [`s3_to_kinesis_lambda.py`](docs/resources/s3_to_kinesis_lambda.py)
 8. Click **Deploy**
 9. Go to **Configuration → General configuration → Edit**:
    - Timeout: **60 seconds** (default 3s is too short)
    - Memory: **128 MB** (sufficient)
    - Click **Save**
 
-> Terraform: [Lambda Producer](#terraform-lambda-producer)
+Or via CLI (zip the handler first):
+```bash
+# 1. Package the handler
+zip function.zip s3_to_kinesis_lambda.py
+
+# 2. Create the function
+aws lambda create-function \
+  --function-name aqi_s3_to_kinesis \
+  --runtime python3.12 \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/aqi_lambda_execution_role \
+  --handler s3_to_kinesis_lambda.lambda_handler \
+  --zip-file fileb://function.zip \
+  --timeout 60 \
+  --memory-size 128 \
+  --region eu-west-2
+```
+
+> Terraform: [Lambda Producer Function](#5-lambda-producer-function)
 
 ### 3.3 — Test the Lambda
 
@@ -262,6 +389,25 @@ The original local script is at [`s3_to_kinesis.py`](resources/s3_to_kinesis.py)
    ```
 4. Verify in **Kinesis → AQI_Stream → Data viewer** — select a shard → Starting position: **Trim horizon** → **Get records**. You should see the JSON records from the CSV.
 
+Or via CLI:
+```bash
+# Invoke the Lambda and capture the response
+aws lambda invoke \
+  --function-name aqi_s3_to_kinesis \
+  --region eu-west-2 \
+  response.json
+cat response.json
+
+# Verify records landed in Kinesis
+aws kinesis get-shard-iterator \
+  --stream-name AQI_Stream \
+  --shard-id shardId-000000000000 \
+  --shard-iterator-type TRIM_HORIZON \
+  --region eu-west-2 \
+  --query 'ShardIterator' --output text \
+  | xargs -I {} aws kinesis get-records --shard-iterator {} --region eu-west-2 --limit 5
+```
+
 ### 3.4 — (Optional) Schedule with EventBridge
 
 To push data repeatedly (simulating a live feed for Flink), add an EventBridge schedule:
@@ -274,11 +420,26 @@ To push data repeatedly (simulating a live feed for Flink), add an EventBridge s
 
 This pushes the same 48 records every 2 minutes. **Disable or delete the schedule when done testing.**
 
-> Terraform: [EventBridge Schedule](#terraform-eventbridge-schedule)
+Or via CLI:
+```bash
+aws scheduler create-schedule \
+  --name aqi-kinesis-feed \
+  --schedule-expression "rate(2 minutes)" \
+  --flexible-time-window Mode=OFF \
+  --target "Arn=arn:aws:lambda:eu-west-2:<ACCOUNT_ID>:function:aqi_s3_to_kinesis,RoleArn=arn:aws:iam::<ACCOUNT_ID>:role/<SCHEDULER_ROLE>" \
+  --region eu-west-2
+
+# To disable later:
+aws scheduler update-schedule --name aqi-kinesis-feed --state DISABLED --region eu-west-2
+# Or delete:
+aws scheduler delete-schedule --name aqi-kinesis-feed --region eu-west-2
+```
+
+> Terraform: [EventBridge Schedule](#6-eventbridge-schedule)
 
 &nbsp;
 
-## Phase 4: Firehose — Raw Data Delivery
+## Step 4: Firehose — Raw Data Delivery
 
 ### 4.1 — Create the Firehose Delivery Stream
 
@@ -293,9 +454,27 @@ This pushes the same 48 records every 2 minutes. **Disable or delete the schedul
    - *(Leave S3 bucket error output prefix empty or set to `aqi_pipeline/rawingestion-errors/`)*
 7. Click **Create Firehose stream**
 
+Or via CLI:
+```bash
+aws firehose create-delivery-stream \
+  --delivery-stream-name AQI_Batch \
+  --delivery-stream-type KinesisStreamAsSource \
+  --kinesis-stream-source-configuration \
+      "KinesisStreamARN=arn:aws:kinesis:eu-west-2:<ACCOUNT_ID>:stream/AQI_Stream,RoleARN=arn:aws:iam::<ACCOUNT_ID>:role/KinesisFirehoseServiceRole-AQI_Batch-eu-west-2" \
+  --extended-s3-destination-configuration \
+      "RoleARN=arn:aws:iam::<ACCOUNT_ID>:role/KinesisFirehoseServiceRole-AQI_Batch-eu-west-2,BucketARN=arn:aws:s3:::aqi-pipeline-bucket,Prefix=aqi_pipeline/rawingestion/,BufferingHints={IntervalInSeconds=60,SizeInMBs=5}" \
+  --region eu-west-2
+
+# Poll until ACTIVE
+aws firehose describe-delivery-stream \
+  --delivery-stream-name AQI_Batch \
+  --region eu-west-2 \
+  --query 'DeliveryStreamDescription.DeliveryStreamStatus'
+```
+
 > **Tutorial note:** The trainer creates a separate bucket named `rawingestion`. We use the `aqi_pipeline/rawingestion/` prefix in our existing bucket instead — same result, no new bucket needed.
 
-> Terraform: [Firehose Delivery Stream](#terraform-firehose-delivery-stream)
+> Terraform: [Firehose Delivery Stream](#8-firehose-delivery-stream)
 
 ### 4.2 — Verify Firehose IAM Role
 
@@ -312,7 +491,58 @@ When you create a Firehose delivery stream, AWS automatically creates a service 
 
 > **Can we reuse an existing role?** No — Firehose requires a role with `firehose.amazonaws.com` as the trusted principal. Neither `aqi_lambda_execution_role` (trusts `lambda.amazonaws.com`) nor the Flink role (trusts `kinesisanalytics.amazonaws.com`) will work. The auto-generated role is the right approach here.
 
-> Terraform: [Firehose IAM Role](#terraform-firehose-iam-role)
+**Trust policy** — what the auto-created role should look like (for reference and Terraform parity):
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": { "Service": "firehose.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+
+**Inline policy** (`firehose-aqi-batch-access`) — scoped Kinesis-read + S3-write:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "KinesisRead",
+            "Effect": "Allow",
+            "Action": [
+                "kinesis:GetRecords",
+                "kinesis:GetShardIterator",
+                "kinesis:DescribeStream",
+                "kinesis:ListShards"
+            ],
+            "Resource": aws_kinesis_stream.aqi_stream.arn
+        },
+        {
+            "Sid": "S3Write",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetBucketLocation",
+                "s3:ListBucket",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+            ],
+            "Resource": [
+                aws_s3_bucket.pipeline_bucket.arn,
+                "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/rawingestion/*"
+            ]
+        }
+    ]
+}
+```
+
+> Terraform: [Firehose IAM Role](#7-firehose-iam-role)
 
 ### 4.3 — Test Firehose Delivery
 
@@ -321,6 +551,18 @@ When you create a Firehose delivery stream, AWS automatically creates a service 
 3. Go to **S3 → `aqi-pipeline-bucket` → `aqi_pipeline/rawingestion/`**
 4. You should see time-partitioned subfolders: `YYYY/MM/DD/HH/`
 5. Navigate into the deepest folder — you should see a file containing raw JSON records
+
+Or via CLI:
+```bash
+# Trigger the producer
+aws lambda invoke --function-name aqi_s3_to_kinesis --region eu-west-2 /tmp/response.json
+
+# Wait ~1-2 minutes, then list delivered files
+aws s3 ls s3://aqi-pipeline-bucket/aqi_pipeline/rawingestion/ --recursive | tail -5
+
+# Inspect one of the delivered files
+aws s3 cp s3://aqi-pipeline-bucket/aqi_pipeline/rawingestion/<YYYY>/<MM>/<DD>/<HH>/<filename> - | head -3
+```
 
 > **The partitioned folder structure** (`2026/04/08/09/AQI_Batch-1-2026-04-08-...`) is Firehose's default behavior. It partitions by the UTC arrival time of the records. This makes it easy to query specific time ranges in Athena.
 
@@ -356,7 +598,7 @@ Firehose reads from `AQI_Stream` and delivers raw JSON to `rawingestion/` with a
 
 &nbsp;
 
-## Phase 5: Raw Data — Glue Crawler + Athena
+## Step 5: Raw Data — Glue Crawler + Athena
 
 Now that Firehose is delivering raw data to S3, we set up a Glue Crawler to discover the schema and make the data queryable in Athena. This completes **Workflow A** (the raw archive path).
 
@@ -364,7 +606,63 @@ Now that Firehose is delivering raw data to S3, we set up a Glue Crawler to disc
 
 The Glue Crawler needs the `aqi-glue-crawler-role` IAM role — it grants scoped permissions to read S3 objects under `aqi_pipeline/*`, write to the Glue Data Catalog, and emit CloudWatch Logs. This role is shared by both crawlers (raw and analytical) and is provisioned via Terraform.
 
-> Terraform: [Glue Crawler Role](#terraform-glue-crawler-role)
+**Trust policy** — allows Glue to assume this role:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": { "Service": "glue.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+
+**Inline policy** (`glue-aqi-crawler-access`) — scoped S3 read + Glue Catalog write + CloudWatch Logs:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3ReadPipelineData",
+            "Effect": "Allow",
+            "Action": ["s3:GetObject", "s3:ListBucket"],
+            "Resource": [
+                aws_s3_bucket.pipeline_bucket.arn,
+                "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/*"
+            ]
+        },
+        {
+            "Sid": "GlueCatalogWrite",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:CreateTable",
+                "glue:UpdateTable",
+                "glue:GetPartitions",
+                "glue:CreatePartition",
+                "glue:BatchCreatePartition"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "CloudWatchLogs",
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": "arn:aws:logs:*:*:*"
+        }
+    ]
+}
+```
+
+> Terraform: [Glue Crawler Role](#9-glue-crawler-role)
 
 ### 5.2 — Create Glue Database
 
@@ -372,9 +670,16 @@ The Glue Crawler needs the `aqi-glue-crawler-role` IAM role — it grants scoped
 2. Name: `aqi_db`
 3. Click **Create**
 
+Or via CLI:
+```bash
+aws glue create-database \
+  --database-input Name=aqi_db \
+  --region eu-west-2
+```
+
 > **Note:** This is a separate database from the `aqi_pipeline_db` which we'll create later for the Flink enriched output. Two databases keep the raw and analytical data cleanly separated.
 
-> Terraform: [Glue Database (Raw)](#terraform-glue-database-raw)
+> Terraform: [Glue Database (Raw)](#10-glue-database-raw)
 
 ### 5.3 — Create Raw Crawler
 
@@ -387,7 +692,22 @@ The Glue Crawler needs the `aqi-glue-crawler-role` IAM role — it grants scoped
 7. Click **Create crawler**
 8. Run the crawler
 
-> Terraform: [Glue Crawler (Raw)](#terraform-glue-crawler-raw)
+Or via CLI:
+```bash
+aws glue create-crawler \
+  --name Raw_Crawler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/aqi-glue-crawler-role \
+  --database-name aqi_db \
+  --targets 'S3Targets=[{Path=s3://aqi-pipeline-bucket/aqi_pipeline/rawingestion/}]' \
+  --region eu-west-2
+
+aws glue start-crawler --name Raw_Crawler --region eu-west-2
+
+# Poll until READY
+aws glue get-crawler --name Raw_Crawler --region eu-west-2 --query 'Crawler.State'
+```
+
+> Terraform: [Glue Crawler (Raw)](#11-glue-crawler-raw)
 
 ### 5.4 — Verify Crawler Results
 
@@ -411,17 +731,115 @@ SELECT * FROM aqi_db.rawingestion LIMIT 20;
 
 You should see the raw AQI records — the same JSON that the Lambda producer pushed into `AQI_Stream`, untransformed by Firehose.
 
+Or via CLI:
+```bash
+QUERY_ID=$(aws athena start-query-execution \
+  --query-string "SELECT * FROM aqi_db.rawingestion LIMIT 20;" \
+  --query-execution-context Database=aqi_db \
+  --result-configuration OutputLocation=s3://aqi-pipeline-bucket/aqi_pipeline/athena-results/ \
+  --region eu-west-2 \
+  --query 'QueryExecutionId' --output text)
+
+# Wait a few seconds, then fetch results
+aws athena get-query-results --query-execution-id $QUERY_ID --region eu-west-2
+```
+
 > *No Terraform equivalent — Athena queries are interactive ad-hoc operations.*
 
 &nbsp;
 
-## Phase 6: Flink Studio Notebook
+## Step 6: Flink Studio Notebook
 
 ### 6.1 — Prerequisite: Flink IAM Role
 
 The Flink notebook needs a **dedicated** IAM role with `kinesisanalytics.amazonaws.com` as the trusted principal. Neither the Lambda role nor the Glue role can be reused — each AWS service requires its own trust policy. The role `kinesis-analytics-AQI_Analytics-eu-west-2` grants scoped access to both Kinesis streams, S3 under `aqi_pipeline/*`, Glue Catalog, and CloudWatch Logs.
 
-> Terraform: [Flink IAM Role](#terraform-flink-iam-role)
+**Trust policy** — allows Managed Flink to assume this role:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": { "Service": "kinesisanalytics.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+
+**Inline policy** (`flink-aqi-scoped-access`) — the four capability groups Flink needs:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "KinesisReadWrite",
+            "Effect": "Allow",
+            "Action": [
+                "kinesis:GetRecords",
+                "kinesis:GetShardIterator",
+                "kinesis:DescribeStream",
+                "kinesis:DescribeStreamSummary",
+                "kinesis:ListShards",
+                "kinesis:PutRecord",
+                "kinesis:PutRecords",
+                "kinesis:SubscribeToShard",
+                "kinesis:ListStreams"
+            ],
+            "Resource": [
+                aws_kinesis_stream.aqi_stream.arn,
+                aws_kinesis_stream.aqi_logs.arn
+            ]
+        },
+        {
+            "Sid": "S3ReadWritePipeline",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:ListBucket",
+                "s3:GetBucketLocation",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+            ],
+            "Resource": [
+                aws_s3_bucket.pipeline_bucket.arn,
+                "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/*"
+            ]
+        },
+        {
+            "Sid": "GlueCatalogAccess",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:GetPartitions",
+                "glue:CreateTable",
+                "glue:UpdateTable"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "CloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:DescribeLogStreams"
+            ],
+            "Resource": "arn:aws:logs:*:*:log-group:/aws/kinesis-analytics/*"
+        }
+    ]
+}
+```
+
+> Terraform: [Flink IAM Role](#12-flink-iam-role)
 
 ### 6.2 — Create the Notebook
 
@@ -434,7 +852,18 @@ The Flink notebook needs a **dedicated** IAM role with `kinesisanalytics.amazona
 4. Click **Create Studio notebook**
 5. Wait for status to show **Created**
 
-> Terraform: [Flink Studio Notebook](#terraform-flink-studio-notebook)
+Or via CLI (Studio Notebook creation is a Zeppelin-backed Flink application — the CLI takes a large JSON config; see [13. Flink Studio Notebook](#13-flink-studio-notebook) for the full resource definition, which is usually the cleaner path):
+```bash
+aws kinesisanalyticsv2 create-application \
+  --application-name AQI_Analytics \
+  --runtime-environment ZEPPELIN-FLINK-3_0 \
+  --application-mode INTERACTIVE \
+  --service-execution-role arn:aws:iam::<ACCOUNT_ID>:role/kinesis-analytics-AQI_Analytics-eu-west-2 \
+  --application-configuration file://flink-notebook-config.json \
+  --region eu-west-2
+```
+
+> Terraform: [Flink Studio Notebook](#13-flink-studio-notebook)
 
 ### 6.3 — Start the Notebook
 
@@ -442,7 +871,20 @@ The Flink notebook needs a **dedicated** IAM role with `kinesisanalytics.amazona
 2. Wait for status to change to **Running** (2–5 minutes)
 3. Once running, click **Open in Apache Zeppelin**
 
-> **While waiting**, you can re-run the producer Lambda (Phase 3) to push more data into `AQI_Stream` so that when the Flink source table is created, there will be data to read.
+Or via CLI:
+```bash
+aws kinesisanalyticsv2 start-application \
+  --application-name AQI_Analytics \
+  --region eu-west-2
+
+# Poll until RUNNING
+aws kinesisanalyticsv2 describe-application \
+  --application-name AQI_Analytics \
+  --region eu-west-2 \
+  --query 'ApplicationDetail.ApplicationStatus'
+```
+
+> **While waiting**, you can re-run the producer Lambda (Step 3) to push more data into `AQI_Stream` so that when the Flink source table is created, there will be data to read.
 
 ### What is Amazon Managed Service for Apache Flink?
 
@@ -505,11 +947,11 @@ AQI_Stream ────►    │   air_quality_source (Kinesis connector)      
 
 &nbsp;
 
-## Phase 7: Flink SQL — Real-Time Processing
+## Step 7: Flink SQL — Real-Time Processing
 
 Once the Flink Studio Notebook is **Running** and you've opened **Apache Zeppelin**, you'll define schemas and start processing jobs. This is **Workflow B** — the analytical processing path that enriches data and produces monitoring output.
 
-> **Reminder:** Workflow A (Firehose → raw archive) is already running from Phase 4. Both workflows consume from the same `AQI_Stream` independently. Firehose delivers raw data; Flink transforms it.
+> **Reminder:** Workflow A (Firehose → raw archive) is already running from Step 4. Both workflows consume from the same `AQI_Stream` independently. Firehose delivers raw data; Flink transforms it.
 
 ### What are we building?
 
@@ -649,7 +1091,7 @@ Create a new block:
 SELECT * FROM air_quality_source;
 ```
 
-This is a **streaming query** — it runs continuously, showing new records as they arrive. If no data appears, run the producer Lambda again (Phase 3) to push more records.
+This is a **streaming query** — it runs continuously, showing new records as they arrive. If no data appears, run the producer Lambda again (Step 3) to push more records.
 
 ### 7.3 — S3 Sink Table (Output Schema)
 
@@ -813,7 +1255,7 @@ WHERE value_of_aqi IS NOT NULL;
 
 &nbsp;
 
-## Phase 8: Verify Flink S3 Output
+## Step 8: Verify Flink S3 Output
 
 After the Flink S3 sink has been running for at least 30 seconds:
 
@@ -821,15 +1263,24 @@ After the Flink S3 sink has been running for at least 30 seconds:
 2. You should see subdirectories and JSON files appearing
 3. Download one file and verify it contains AQI records with the added `parameter_uppercase` and `value_in_fahrenheit` fields
 
+Or via CLI:
+```bash
+# List delivered files (most recent 5)
+aws s3 ls s3://aqi-pipeline-bucket/aqi_pipeline/flink_output/co-measurements/ --recursive | tail -5
+
+# Inspect one file to confirm enriched columns are present
+aws s3 cp s3://aqi-pipeline-bucket/aqi_pipeline/flink_output/co-measurements/<key> - | head -3
+```
+
 > *No Terraform equivalent — this is a manual verification step to confirm the Flink S3 sink is producing output.*
 
 &nbsp;
 
-## Phase 9: Analytical Data — Glue Catalog + Athena Querying
+## Step 9: Analytical Data — Glue Catalog + Athena Querying
 
-Once enriched data is in S3 from Flink, set up Glue and Athena to query the **analytical** output. This completes **Workflow B's** queryable layer — parallel to the raw data querying you set up in Phase 5.
+Once enriched data is in S3 from Flink, set up Glue and Athena to query the **analytical** output. This completes **Workflow B's** queryable layer — parallel to the raw data querying you set up in Step 5.
 
-> **Two Glue databases, two purposes:** Phase 5 created `aqi_db` for querying raw Firehose output. This phase creates `aqi_pipeline_db` for querying Flink's enriched output with the added `parameter_uppercase` and `value_in_fahrenheit` columns.
+> **Two Glue databases, two purposes:** Step 5 created `aqi_db` for querying raw Firehose output. This step creates `aqi_pipeline_db` for querying Flink's enriched output with the added `parameter_uppercase` and `value_in_fahrenheit` columns.
 
 ### 9.1 — Create Glue Database
 
@@ -837,11 +1288,18 @@ Once enriched data is in S3 from Flink, set up Glue and Athena to query the **an
 2. Name: `aqi_pipeline_db`
 3. Click **Create**
 
-> Terraform: [Glue Database (Analytical)](#terraform-glue-database-analytical)
+Or via CLI:
+```bash
+aws glue create-database \
+  --database-input Name=aqi_pipeline_db \
+  --region eu-west-2
+```
+
+> Terraform: [Glue Database (Analytical)](#14-glue-database-analytical)
 
 ### 9.2 — Glue Crawler for Enriched Output
 
-IAM role: `aqi-glue-crawler-role` — same role created for the raw crawler (see [Phase 5.1](#51--prerequisite-glue-crawler-role)). No additional IAM changes needed.
+IAM role: `aqi-glue-crawler-role` — same role created for the raw crawler (see [Step 5.1](#51--prerequisite-glue-crawler-role)). No additional IAM changes needed.
 
 1. Go to **AWS Glue → Crawlers → Create crawler**
 2. Name: `aqi_measurements_crawler`
@@ -852,7 +1310,19 @@ IAM role: `aqi-glue-crawler-role` — same role created for the raw crawler (see
 7. Click **Create crawler**
 8. Run the crawler
 
-> Terraform: [Glue Crawler (Analytical)](#terraform-glue-crawler-analytical)
+Or via CLI:
+```bash
+aws glue create-crawler \
+  --name aqi_measurements_crawler \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/aqi-glue-crawler-role \
+  --database-name aqi_pipeline_db \
+  --targets 'S3Targets=[{Path=s3://aqi-pipeline-bucket/aqi_pipeline/flink_output/co-measurements/}]' \
+  --region eu-west-2
+
+aws glue start-crawler --name aqi_measurements_crawler --region eu-west-2
+```
+
+> Terraform: [Glue Crawler (Analytical)](#15-glue-crawler-analytical)
 
 ### 9.3 — Alternative: Athena DDL (Recommended)
 
@@ -918,7 +1388,7 @@ LIMIT 50;
 
 &nbsp;
 
-## Phase 10: CloudWatch Monitoring via Lambda + SNS Notifications
+## Step 10: CloudWatch Monitoring via Lambda + SNS Notifications
 
 Now we close the monitoring loop. A **second Lambda function** reads the windowed aggregate records from `AQI_Logs`, pushes them into **CloudWatch Logs**, and sends an **SNS email notification** on each execution.
 
@@ -963,9 +1433,26 @@ CloudWatch organizes logs as **Log Groups** (container) → **Log Streams** (seq
 11. Click on it — you should see one log stream: `AQI_Logs_Stream`
 12. Click on `AQI_Logs_Stream` — the **Log events** table should be empty (no events yet — that's expected, data comes after the Lambda runs)
 
+Or via CLI:
+```bash
+aws logs create-log-group \
+  --log-group-name /aws/lambda/Logs_to_Cloud_Watch \
+  --region eu-west-2
+
+aws logs create-log-stream \
+  --log-group-name /aws/lambda/Logs_to_Cloud_Watch \
+  --log-stream-name AQI_Logs_Stream \
+  --region eu-west-2
+
+# Verify
+aws logs describe-log-streams \
+  --log-group-name /aws/lambda/Logs_to_Cloud_Watch \
+  --region eu-west-2
+```
+
 > **Why create these manually?** The Lambda code also creates them programmatically (the `ensure_log_stream()` function), so this step is optional. But creating them first means you can verify the Lambda's output lands in the right place.
 
-> Terraform: [CloudWatch Log Group + Stream](#terraform-cloudwatch-log-group--stream)
+> Terraform: [CloudWatch Log Group + Stream](#16-cloudwatch-log-group--stream)
 
 ### 10.2 — SNS: Create Topic and Email Subscription
 
@@ -988,19 +1475,84 @@ SNS sends notifications to subscribers when a message is published to a topic.
 9. **Check your email** — click **Confirm subscription** in the AWS notification
 10. Back in SNS console, subscription status should change to `Confirmed`
 
+Or via CLI:
+```bash
+# 1. Create the topic
+TOPIC_ARN=$(aws sns create-topic \
+  --name Records_SNS \
+  --region eu-west-2 \
+  --query 'TopicArn' --output text)
+
+# 2. Subscribe your email
+aws sns subscribe \
+  --topic-arn $TOPIC_ARN \
+  --protocol email \
+  --notification-endpoint your-email@bookingholdings.com \
+  --region eu-west-2
+
+# 3. Confirm the subscription via the link in the email AWS sends you
+# 4. Verify it's confirmed (not PendingConfirmation)
+aws sns list-subscriptions-by-topic --topic-arn $TOPIC_ARN --region eu-west-2
+```
+
 > ⚠️ **Topic ARN vs Subscription ARN:** The SNS page shows two different ARNs. The **Topic ARN** ends in the topic name (e.g. `...:Records_SNS`). The **Subscription ARN** has an extra UUID appended (e.g. `...:Records_SNS:5b138059-...`). You need the **Topic ARN** for the Lambda code — if you accidentally use the subscription ARN, `sns.publish()` will fail with `Invalid parameter: Topic Name`.
 
-> Terraform: [SNS Topic + Subscription](#terraform-sns-topic--subscription)
+> Terraform: [SNS Topic + Subscription](#17-sns-topic--subscription)
 
 ### 10.3 — Prerequisite: Additional IAM Policy for Monitoring
 
-The monitoring Lambda reuses the `aqi_lambda_execution_role` (created in [Phase 3.1](#31--prerequisite-lambda-execution-role)) but needs additional permissions — reading from `AQI_Logs`, writing to CloudWatch Logs, and publishing to SNS. These are added as a separate inline policy via Terraform.
+The monitoring Lambda reuses the `aqi_lambda_execution_role` (created in [Step 3.1](#31--prerequisite-lambda-execution-role)) but needs additional permissions — reading from `AQI_Logs`, writing to CloudWatch Logs, and publishing to SNS. These are added as a separate inline policy via Terraform.
 
-> Terraform: [Lambda CloudWatch + SNS Policy](#terraform-lambda-cloudwatch--sns-policy)
+**Inline policy** (`lambda-cloudwatch-sns-aqi-access`) — attached to the existing `aqi_lambda_execution_role`:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "KinesisReadForTrigger",
+            "Effect": "Allow",
+            "Action": [
+                "kinesis:GetRecords",
+                "kinesis:GetShardIterator",
+                "kinesis:DescribeStream",
+                "kinesis:DescribeStreamSummary",
+                "kinesis:ListShards",
+                "kinesis:ListStreams"
+            ],
+            "Resource": [aws_kinesis_stream.aqi_logs.arn]
+        },
+        {
+            "Sid": "CloudWatchLogsWrite",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:DescribeLogStreams"
+            ],
+            "Resource": [
+                "arn:aws:logs:*:*:log-group:/aws/lambda/Logs_to_Cloud_Watch",
+                "arn:aws:logs:*:*:log-group:/aws/lambda/Logs_to_Cloud_Watch:*"
+            ]
+        },
+        {
+            "Sid": "SNSPublish",
+            "Effect": "Allow",
+            "Action": "sns:Publish",
+            "Resource": aws_sns_topic.aqi_records_sns.arn
+        }
+    ]
+}
+```
+
+> **Note on `<ACCOUNT_ID>`:** Replace with your 12-digit AWS account ID before applying. See the [Parameterization Note](#parameterization-note) in the Terraform section for all hardcoded values that need substitution.
+
+> Terraform: [Lambda CloudWatch + SNS Policy](#18-lambda-cloudwatch--sns-policy)
 
 ### 10.4 — Lambda: Create `Logs_to_Cloud_Watch`
 
-The code is in [`kinesis_to_cloudwatch_lambda.py`](resources/kinesis_to_cloudwatch_lambda.py).
+The code is in [`kinesis_to_cloudwatch_lambda.py`](docs/resources/kinesis_to_cloudwatch_lambda.py).
 
 1. Go to **Lambda → Create function**
 2. **Author from scratch**
@@ -1010,7 +1562,7 @@ The code is in [`kinesis_to_cloudwatch_lambda.py`](resources/kinesis_to_cloudwat
 6. Execution role: **Use an existing role** → select `aqi_lambda_execution_role`
    - (Make sure the `lambda-cloudwatch-sns-aqi-access` inline policy is already attached)
 7. Click **Create function**
-8. In the code editor, **delete the default code** and paste the contents of [`kinesis_to_cloudwatch_lambda.py`](resources/kinesis_to_cloudwatch_lambda.py)
+8. In the code editor, **delete the default code** and paste the contents of [`kinesis_to_cloudwatch_lambda.py`](docs/resources/kinesis_to_cloudwatch_lambda.py)
 9. **Update the SNS ARN in the code:** Go to **SNS → Topics → `Records_SNS`** and copy the **Topic ARN** (not the Subscription ARN — see warning in 9.2). Back in the Lambda code editor, replace `<ACCOUNT_ID>` in the `SNS_TOPIC_ARN` line with your account ID so the ARN matches what you copied.
 10. Click **Deploy** (the code won't take effect until you deploy)
 11. Go to **Configuration → General configuration → Edit**:
@@ -1018,7 +1570,24 @@ The code is in [`kinesis_to_cloudwatch_lambda.py`](resources/kinesis_to_cloudwat
     - Memory: **128 MB**
     - Click **Save**
 
-> Terraform: [Lambda Monitor Function](#terraform-lambda-monitor-function)
+Or via CLI (after editing `kinesis_to_cloudwatch_lambda.py` to set the SNS_TOPIC_ARN):
+```bash
+zip monitor.zip kinesis_to_cloudwatch_lambda.py
+
+aws lambda create-function \
+  --function-name Logs_to_Cloud_Watch \
+  --runtime python3.13 \
+  --architectures arm64 \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/aqi_lambda_execution_role \
+  --handler kinesis_to_cloudwatch_lambda.lambda_handler \
+  --zip-file fileb://monitor.zip \
+  --timeout 60 \
+  --memory-size 128 \
+  --environment "Variables={SNS_TOPIC_ARN=$TOPIC_ARN}" \
+  --region eu-west-2
+```
+
+> Terraform: [Lambda Monitor Function](#19-lambda-monitor-function)
 
 ### 10.5 — Test the Lambda (Manual)
 
@@ -1048,9 +1617,19 @@ Connect the Lambda to `AQI_Logs` so it fires automatically:
 5. Batch size: **100** (default)
 6. Click **Add**
 
+Or via CLI:
+```bash
+aws lambda create-event-source-mapping \
+  --function-name Logs_to_Cloud_Watch \
+  --event-source-arn arn:aws:kinesis:eu-west-2:<ACCOUNT_ID>:stream/AQI_Logs \
+  --starting-position TRIM_HORIZON \
+  --batch-size 100 \
+  --region eu-west-2
+```
+
 > **What happens now?** Lambda polls `AQI_Logs` every few seconds. When Flink writes aggregate records, Lambda picks them up, pushes them to CloudWatch, and sends an SNS email for each batch. Kinesis batches records together, so you get one email per Lambda invocation, not one per record.
 
-> Terraform: [Kinesis Trigger](#terraform-kinesis-trigger)
+> Terraform: [Kinesis → Lambda Trigger](#20-kinesis--lambda-trigger)
 
 ### 10.7 — Verify End-to-End
 
@@ -1059,9 +1638,9 @@ Connect the Lambda to `AQI_Logs` so it fires automatically:
 3. **Check CloudWatch:** Go to **CloudWatch → Logs → Log Management → `/aws/lambda/Logs_to_Cloud_Watch` → `AQI_Logs_Stream`** — refresh, you should see new events with `record_count` > 0
 4. **Check email:** You should receive "AQI Logs Update" notifications
 
-> **Still seeing `record_count: 0`?** Make sure the Flink notebook is **running** with the windowed aggregation INSERT (Phase 7.6) active, and that data was pushed to `AQI_Stream` recently.
+> **Still seeing `record_count: 0`?** Make sure the Flink notebook is **running** with the windowed aggregation INSERT (Step 7.6) active, and that data was pushed to `AQI_Stream` recently.
 
-### 10.8 — What We Built in Phase 10
+### 10.8 — What We Built in Step 10
 
 | Resource | Name | Purpose |
 |----------|------|---------|
@@ -1075,9 +1654,9 @@ Connect the Lambda to `AQI_Logs` so it fires automatically:
 
 &nbsp;
 
-## Phase 11: Amazon Managed Grafana — Dashboards
+## Step 11: Amazon Managed Grafana — Dashboards
 
-> Terraform: [Grafana Workspace](#terraform-grafana-workspace) · [Grafana Role Policy](#terraform-grafana-role-policy)
+> Terraform: [Grafana Workspace](#22-grafana-workspace) · [Grafana IAM Role](#21-grafana-iam-role)
 
 Grafana gives us a visual layer on top of CloudWatch Logs. Instead of reading raw log output, we build dashboards that chart record counts, AQI trends, and processing metrics over time.
 
@@ -1092,7 +1671,24 @@ Grafana gives us a visual layer on top of CloudWatch Logs. Instead of reading ra
 
 The Grafana workspace needs an IAM role with `grafana.amazonaws.com` as the trusted principal and the `AmazonGrafanaCloudWatchAccess` managed policy. This role is provisioned via Terraform.
 
-> Terraform: [Grafana Role Policy](#terraform-grafana-role-policy)
+**Trust policy** — allows Grafana to assume this role:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": { "Service": "grafana.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+
+**Managed policy attached:** `arn:aws:iam::aws:policy/service-role/AmazonGrafanaCloudWatchAccess` — AWS-managed policy granting CloudWatch Logs and Metrics read access (no custom JSON needed; scope is defined by AWS).
+
+> Terraform: [Grafana IAM Role](#21-grafana-iam-role)
 
 ### 11.2 — Create the Grafana Workspace
 
@@ -1103,6 +1699,22 @@ The Grafana workspace needs an IAM role with `grafana.amazonaws.com` as the trus
 5. Click Next (leave remaining settings as default)
 6. Data sources: opt in for **Amazon CloudWatch**
 7. Click Next → **Create workspace**
+
+Or via CLI:
+```bash
+aws grafana create-workspace \
+  --workspace-name AQI_Logs_Dashboard \
+  --account-access-type CURRENT_ACCOUNT \
+  --authentication-providers AWS_SSO \
+  --permission-type SERVICE_MANAGED \
+  --workspace-data-sources CLOUDWATCH \
+  --workspace-role-arn arn:aws:iam::<ACCOUNT_ID>:role/AQI-Grafana-Role \
+  --region eu-west-2
+
+# Poll until status is ACTIVE
+aws grafana list-workspaces --region eu-west-2 \
+  --query "workspaces[?name=='AQI_Logs_Dashboard'].{Id:id,Status:status}"
+```
 
 > **⚠️ Corporate note — IAM Identity Center:** The tutorial creates a standalone IAM Identity Center user for Grafana login. In a corporate environment with Okta SSO, your organization likely already federates identities. Check with your admin whether you can use your existing SSO identity instead of creating a new Identity Center user. If Okta is already integrated with IAM Identity Center, skip the user creation in step 10.2 and use your corporate login.
 
@@ -1133,7 +1745,7 @@ Before logging in, confirm the Grafana workspace role has CloudWatch access:
 2. Search for the Grafana role (created automatically with the workspace — name contains `grafana`)
 3. Verify it has the **AmazonGrafanaCloudWatchAccess** managed policy attached
 
-> If the role is missing or doesn't have CloudWatch access, this needs to be provisioned through DevOps. See [Terraform: Grafana Role Policy](#terraform-grafana-role-policy).
+> If the role is missing or doesn't have CloudWatch access, this needs to be provisioned through DevOps. See [21. Grafana IAM Role](#21-grafana-iam-role).
 
 ### 11.6 — Log In to Grafana
 
@@ -1211,7 +1823,7 @@ fields @timestamp, @message
 
 > Select **Time series** as the visualization type. This charts how many tumbling windows complete per interval — a drop indicates processing delays or missing source data.
 
-### 11.10 — What We Built in Phase 11
+### 11.10 — What We Built in Step 11
 
 | Resource | Name | Purpose |
 |----------|------|---------|
@@ -1223,49 +1835,49 @@ fields @timestamp, @message
 
 &nbsp;
 
-# Troubleshooting
+## Troubleshooting
 
 Common issues you may hit during setup, grouped by component.
 Start with the group that matches the error you're seeing.
 
-## Flink Issues
+### Flink Issues
 
-### Flink source table shows no data
+#### Flink source table shows no data
 
 1. Verify Kinesis stream has data: **Kinesis → AQI_Stream → Monitoring** — check `IncomingRecords`
 2. Re-run the producer Lambda to push more records
 3. Check `scan.stream.initpos = 'TRIM_HORIZON'` — if set to `LATEST`, only new records are read
 
-### Flink S3 sink doesn't produce files
+#### Flink S3 sink doesn't produce files
 
 1. Checkpointing must be enabled — verify `SET 'execution.checkpointing.interval' = '10 s'` was run
 2. Wait at least 30 seconds (the rollover interval)
 3. Check the Flink notebook role has S3 write permissions on `aqi-pipeline-bucket`
 
-## Firehose Issues
+### Firehose Issues
 
-### Firehose `rawingestion/` folder is empty
+#### Firehose `rawingestion/` folder is empty
 
 1. Verify `AQI_Stream` has data: **Kinesis → AQI_Stream → Data viewer** → Trim horizon → Get records
 2. Wait at least 60 seconds — Firehose buffers before flushing (minimum buffer interval is 60s)
 3. Check the Firehose delivery stream status: **Amazon Data Firehose → `AQI_Batch`** — status should be **Active**
 4. Check the Firehose IAM role has both Kinesis read and S3 write permissions
 
-### Firehose access denied errors
+#### Firehose access denied errors
 
 1. Go to **Amazon Data Firehose → `AQI_Batch` → Configuration → Service access**
 2. Click the IAM role name
 3. Verify it has: Kinesis read actions on `AQI_Stream` and S3 write actions on `aqi-pipeline-bucket`
 4. If the auto-generated policy is missing, add `AmazonKinesisFullAccess` and `AmazonS3FullAccess` as managed policies
 
-## Lambda Issues
+### Lambda Issues
 
-### Access Denied errors in Lambda producer
+#### Access Denied errors in Lambda producer
 
 1. Ensure `aqi_lambda_execution_role` has `kinesis:PutRecord` on `AQI_Stream`
 2. Ensure `aqi_lambda_execution_role` has `s3:GetObject` + `s3:ListBucket` on `aqi-pipeline-bucket`
 
-### Lambda `Logs_to_Cloud_Watch` — AccessDenied
+#### Lambda `Logs_to_Cloud_Watch` — AccessDenied
 
 1. Check which action failed in the error message:
    - `logs:PutLogEvents` → missing CloudWatchLogsWrite
@@ -1273,40 +1885,40 @@ Start with the group that matches the error you're seeing.
    - `kinesis:GetRecords` → missing KinesisReadForTrigger
 2. Verify `lambda-cloudwatch-sns-aqi-access` is attached to `aqi_lambda_execution_role`
 
-### Lambda trigger shows records but CloudWatch has `record_count: 0`
+#### Lambda trigger shows records but CloudWatch has `record_count: 0`
 
 Expected on first test. The `record_count: 0` events come from Flink windows that closed with no data:
 1. Push data to `AQI_Stream` (run the producer Lambda)
-2. Make sure the Flink notebook is running with the windowed aggregation INSERT active (Phase 7.6)
+2. Make sure the Flink notebook is running with the windowed aggregation INSERT active (Step 7.6)
 3. Wait 1-2 minutes for a window to close with data
 
-### SNS email not arriving
+#### SNS email not arriving
 
 1. Check subscription status in **SNS → Topics → `Records_SNS` → Subscriptions** — must say `Confirmed`
 2. If `PendingConfirmation`, check email (including spam) for the confirmation link
 3. Verify the `SNS_TOPIC_ARN` in the Lambda code matches the actual topic ARN exactly
 4. Check Lambda execution logs in CloudWatch for SNS publish errors
 
-## Grafana Issues
+### Grafana Issues
 
-### Grafana — "explicit deny in a permissions boundary"
+#### Grafana — "explicit deny in a permissions boundary"
 
 This means the `developer` role's permissions boundary blocks `grafana:*` entirely. No policy addition can override it — DevOps must update the permissions boundary itself to allow Grafana actions.
 
-### Grafana workspace shows no data in panels
+#### Grafana workspace shows no data in panels
 
 1. Verify the CloudWatch data source region matches your pipeline region (`eu-west-2`)
 2. Confirm the log group `/aws/lambda/Logs_to_Cloud_Watch` is selected in the query panel
-3. Check that the monitoring Lambda (Phase 10) is still running and receiving Kinesis triggers
+3. Check that the monitoring Lambda (Step 10) is still running and receiving Kinesis triggers
 4. Adjust the time range in the top-right of Grafana — default may be too narrow
 
-### Grafana login fails with IAM Identity Center
+#### Grafana login fails with IAM Identity Center
 
 If using corporate Okta SSO, ensure your admin has federated Okta with IAM Identity Center. If using a standalone Identity Center user, verify the user was assigned to the workspace and has Admin role.
 
-## Query & Data Issues
+### Query & Data Issues
 
-### Athena query returns zero rows
+#### Athena query returns zero rows
 
 1. Verify JSON files exist in `S3 → aqi-pipeline-bucket → aqi_pipeline/flink_output/co-measurements/`
 2. Check the `LOCATION` matches the actual S3 path exactly (including trailing slash)
@@ -1314,15 +1926,17 @@ If using corporate Okta SSO, ensure your admin has federated Okta with IAM Ident
 
 &nbsp;
 
-# Section 3: Terraform Reference
+## Terraform Reference
 
-This section provides a complete, copy-pasteable Terraform configuration that reproduces every AWS resource built through the console guide in Section 2. You can use it in two ways: **(a)** hand the entire file to your DevOps team so they can provision the pipeline in a repeatable, auditable manner, or **(b)** run it yourself in a sandbox account where you have admin rights, then point your team at the state file for production promotion.
+This section provides a complete, copy-pasteable Terraform configuration that reproduces every AWS resource built through the console guide above. You can use it in two ways: **(a)** hand the entire file to your DevOps team so they can provision the pipeline in a repeatable, auditable manner, or **(b)** run it yourself in a sandbox account where you have admin rights, then point your team at the state file for production promotion.
 
 **DevOps handoff workflow:** Because the corporate AWS account restricts direct IAM and infrastructure creation, the recommended workflow is to commit these Terraform files to your team's infra repository, open a merge request tagged `pipeline-infra`, and let DevOps review, plan, and apply. IAM-related blocks (Flink IAM Role, Lambda CloudWatch + SNS Policy) are flagged below so reviewers know which resources require elevated privileges. All other resources (S3 objects, Kinesis streams, Lambda functions, Glue, CloudWatch, SNS, EventBridge) can typically be applied by a developer role with scoped permissions.
 
 > **Order matters:** Apply these resources in the order listed. Later resources reference earlier ones (e.g., the Flink notebook references the IAM role, the Kinesis trigger references both the stream and the Lambda). Terraform handles the dependency graph automatically, but if you apply blocks selectively, follow the ordering below.
 
 Before any `resource` blocks, your `.tf` file needs the standard provider preamble. This tells Terraform which cloud provider plugin to download and which region to target:
+
+### Provider
 
 ```hcl
 terraform {
@@ -1336,21 +1950,21 @@ terraform {
 }
 
 provider "aws" {
-  region = "eu-west-2"   # London — must match console guide
+  region = "eu-west-2"  # Change to your region — London (eu-west-2) in the tutorial
 }
 ```
 
-The blocks below appear in the same order as the console guide phases (Phase 1 → Phase 11) so you can cross-reference each resource with its manual equivalent. Resources that have no Terraform equivalent (Flink SQL paragraphs, manual S3 uploads, Athena queries, email confirmation clicks) are handled interactively in Section 2 — Terraform covers only the provisionable infrastructure.
+The blocks below appear in the same order as the console guide steps (Step 1 → Step 11) so you can cross-reference each resource with its manual equivalent. Resources that have no Terraform equivalent (Flink SQL paragraphs, manual S3 uploads, Athena queries, email confirmation clicks) are handled interactively in the console guide above — Terraform covers only the provisionable infrastructure.
 
-> **What's not covered:** Phase 7 (Flink SQL processing) and Phase 8 (S3 output verification) are interactive steps performed inside the Flink notebook and AWS Console respectively — they have no Terraform representation. Similarly, the initial CSV data upload and Athena ad-hoc queries from Phases 5 and 9 are manual steps.
+> **What's not covered:** Step 7 (Flink SQL processing) and Step 8 (S3 output verification) are interactive steps performed inside the Flink notebook and AWS Console respectively — they have no Terraform representation. Similarly, the initial CSV data upload and Athena ad-hoc queries from Steps 5 and 9 are manual steps.
 
-## Terraform: S3 Bucket
+### 1. S3 Bucket
 
-Creates the S3 bucket that stores all pipeline data. Versioning is disabled (not needed for streaming output), and the bucket is tagged for easy identification. Corresponds to **Phase 1, step 1.1** in the console guide.
+Creates the S3 bucket that stores all pipeline data. Versioning is disabled (not needed for streaming output), and the bucket is tagged for easy identification. Corresponds to **Step 1, step 1.1** in the console guide.
 
 ```hcl
 resource "aws_s3_bucket" "pipeline_bucket" {
-  bucket = "aqi-pipeline-bucket"
+  bucket = "aqi-pipeline-bucket-<UNIQUE_SUFFIX>"  # S3 bucket names are globally unique — append a suffix
 
   tags = {
     Project = "real-time-aqi-pipeline"
@@ -1359,9 +1973,9 @@ resource "aws_s3_bucket" "pipeline_bucket" {
 }
 ```
 
-## Terraform: S3 Folder Prefixes
+### 2. S3 Folder Prefixes
 
-Creates the four S3 folder prefixes used by the pipeline: `source_data/` (where the Lambda producer reads CSV rows), `rawingestion/` (where Firehose delivers raw JSON archives), `flink_output/co-measurements/` (where Flink writes enriched JSON), and `athena-results/` (where Athena stores query output). Corresponds to **Phase 1, step 1.2** in the console guide.
+Creates the four S3 folder prefixes used by the pipeline: `source_data/` (where the Lambda producer reads CSV rows), `rawingestion/` (where Firehose delivers raw JSON archives), `flink_output/co-measurements/` (where Flink writes enriched JSON), and `athena-results/` (where Athena stores query output). Corresponds to **Step 1, step 1.2** in the console guide.
 
 ```hcl
 resource "aws_s3_object" "aqi_source_data_prefix" {
@@ -1389,9 +2003,9 @@ resource "aws_s3_object" "aqi_athena_results_prefix" {
 }
 ```
 
-## Terraform: Kinesis Data Streams
+### 3. Kinesis Data Streams
 
-Creates the two Kinesis data streams that form the pipeline's real-time backbone. `AQI_Stream` carries raw AQI records from the Lambda producer to the Flink notebook, while `AQI_Logs` carries Flink's windowed aggregation output to the monitoring Lambda. Both use ON_DEMAND capacity mode so you pay per-record rather than provisioning shards upfront — ideal for a training pipeline with variable throughput. Corresponds to **Phase 2** in the console guide.
+Creates the two Kinesis data streams that form the pipeline's real-time backbone. `AQI_Stream` carries raw AQI records from the Lambda producer to the Flink notebook, while `AQI_Logs` carries Flink's windowed aggregation output to the monitoring Lambda. Both use ON_DEMAND capacity mode so you pay per-record rather than provisioning shards upfront — ideal for a training pipeline with variable throughput. Corresponds to **Step 2** in the console guide.
 
 ```hcl
 resource "aws_kinesis_stream" "aqi_stream" {
@@ -1423,9 +2037,9 @@ resource "aws_kinesis_stream" "aqi_logs" {
 }
 ```
 
-## Terraform: Lambda Execution Role
+### 4. Lambda Execution Role
 
-Creates the IAM role that both Lambda functions (`aqi_s3_to_kinesis` and `Logs_to_Cloud_Watch`) assume at runtime. The trust policy allows `lambda.amazonaws.com` to assume this role. The inline policy grants scoped access to read from the S3 source folder, write to Kinesis, and emit CloudWatch Logs. Corresponds to **Phase 3, step 3.1** in the console guide.
+Creates the IAM role that both Lambda functions (`aqi_s3_to_kinesis` and `Logs_to_Cloud_Watch`) assume at runtime. The trust policy allows `lambda.amazonaws.com` to assume this role. The inline policy grants scoped access to read from the S3 source folder, write to Kinesis, and emit CloudWatch Logs. Corresponds to **Step 3, step 3.1** in the console guide.
 
 ```hcl
 resource "aws_iam_role" "lambda_execution_role" {
@@ -1460,30 +2074,30 @@ resource "aws_iam_role_policy" "lambda_producer_access" {
         Effect = "Allow"
         Action = ["s3:GetObject", "s3:ListBucket"]
         Resource = [
-          "arn:aws:s3:::aqi-pipeline-bucket",
-          "arn:aws:s3:::aqi-pipeline-bucket/aqi_pipeline/source_data/*"
+          aws_s3_bucket.pipeline_bucket.arn,
+          "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/source_data/*"
         ]
       },
       {
         Sid    = "KinesisWrite"
         Effect = "Allow"
         Action = ["kinesis:PutRecord", "kinesis:PutRecords"]
-        Resource = "arn:aws:kinesis:eu-west-2:*:stream/AQI_Stream"
+        Resource = aws_kinesis_stream.aqi_stream.arn
       },
       {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:eu-west-2:*:*"
+        Resource = "arn:aws:logs:*:*:*"
       }
     ]
   })
 }
 ```
 
-## Terraform: Lambda Producer
+### 5. Lambda Producer Function
 
-Deploys the `s3_to_kinesis_lambda` function that reads CSV rows from the S3 source folder and pushes them into `AQI_Stream`. The handler path points to the `s3_to_kinesis_lambda.py` file (zipped for deployment). The 60-second timeout gives it enough headroom to batch-put several hundred records per invocation. You'll need to zip the source file and place it alongside your `.tf` file before running `terraform apply`. Corresponds to the Lambda creation step in **Phase 3** of the console guide.
+Deploys the `s3_to_kinesis_lambda` function that reads CSV rows from the S3 source folder and pushes them into `AQI_Stream`. The handler path points to the `s3_to_kinesis_lambda.py` file (zipped for deployment). The 60-second timeout gives it enough headroom to batch-put several hundred records per invocation. You'll need to zip the source file and place it alongside your `.tf` file before running `terraform apply`. Corresponds to the Lambda creation step in **Step 3** of the console guide.
 
 ```hcl
 resource "aws_lambda_function" "aqi_s3_to_kinesis" {
@@ -1498,9 +2112,9 @@ resource "aws_lambda_function" "aqi_s3_to_kinesis" {
 }
 ```
 
-## Terraform: EventBridge Schedule
+### 6. EventBridge Schedule
 
-Sets up an EventBridge Scheduler rule that invokes the Lambda producer every 2 minutes, keeping a steady flow of AQI records into `AQI_Stream`. The `flexible_time_window` is set to `OFF` so the schedule fires at exact intervals rather than within a jitter window. The `role_arn` must reference a role that EventBridge Scheduler can assume to invoke the Lambda — if that role doesn't exist yet, add it to the DevOps request alongside the IAM blocks above. Corresponds to the scheduling step in **Phase 3** of the console guide.
+Sets up an EventBridge Scheduler rule that invokes the Lambda producer every 2 minutes, keeping a steady flow of AQI records into `AQI_Stream`. The `flexible_time_window` is set to `OFF` so the schedule fires at exact intervals rather than within a jitter window. The `role_arn` must reference a role that EventBridge Scheduler can assume to invoke the Lambda — if that role doesn't exist yet, add it to the DevOps request alongside the IAM blocks above. Corresponds to the scheduling step in **Step 3** of the console guide.
 
 ```hcl
 resource "aws_scheduler_schedule" "aqi_kinesis_feed" {
@@ -1517,13 +2131,13 @@ resource "aws_scheduler_schedule" "aqi_kinesis_feed" {
 }
 ```
 
-## Terraform: Firehose IAM Role
+### 7. Firehose IAM Role
 
-Creates the IAM role that the Firehose delivery stream assumes. The trust policy allows `firehose.amazonaws.com` to assume this role. The inline policy grants scoped access to read from `AQI_Stream` and write to the `rawingestion/` prefix in S3. **Note:** Because this creates an IAM role, it must be provisioned by your DevOps team per corporate policy. Corresponds to the role verification in **Phase 4** of the console guide.
+Creates the IAM role that the Firehose delivery stream assumes. The trust policy allows `firehose.amazonaws.com` to assume this role. The inline policy grants scoped access to read from `AQI_Stream` and write to the `rawingestion/` prefix in S3. **Note:** Because this creates an IAM role, it must be provisioned by your DevOps team per corporate policy. Corresponds to the role verification in **Step 4** of the console guide.
 
 ```hcl
 resource "aws_iam_role" "firehose_role" {
-  name = "KinesisFirehoseServiceRole-AQI_Batch-eu-west-2"
+  name = "KinesisFirehoseServiceRole-AQI_Batch"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -1556,7 +2170,7 @@ resource "aws_iam_role_policy" "firehose_access" {
           "kinesis:GetRecords", "kinesis:GetShardIterator",
           "kinesis:DescribeStream", "kinesis:ListShards"
         ]
-        Resource = "arn:aws:kinesis:eu-west-2:*:stream/AQI_Stream"
+        Resource = aws_kinesis_stream.aqi_stream.arn
       },
       {
         Sid    = "S3Write"
@@ -1566,8 +2180,8 @@ resource "aws_iam_role_policy" "firehose_access" {
           "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"
         ]
         Resource = [
-          "arn:aws:s3:::aqi-pipeline-bucket",
-          "arn:aws:s3:::aqi-pipeline-bucket/aqi_pipeline/rawingestion/*"
+          aws_s3_bucket.pipeline_bucket.arn,
+          "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/rawingestion/*"
         ]
       }
     ]
@@ -1575,9 +2189,9 @@ resource "aws_iam_role_policy" "firehose_access" {
 }
 ```
 
-## Terraform: Firehose Delivery Stream
+### 8. Firehose Delivery Stream
 
-Creates the Amazon Data Firehose delivery stream that reads raw records from `AQI_Stream` and delivers them to the `rawingestion/` prefix in S3. The `ExtendedS3` destination type is required for S3 delivery (despite the name, it's the standard S3 destination). Buffering is set to 60 seconds / 5 MB — whichever threshold hits first triggers a flush. The role ARN references the [Firehose IAM Role](#terraform-firehose-iam-role) defined above. Corresponds to **Phase 4** in the console guide.
+Creates the Amazon Data Firehose delivery stream that reads raw records from `AQI_Stream` and delivers them to the `rawingestion/` prefix in S3. The `ExtendedS3` destination type is required for S3 delivery (despite the name, it's the standard S3 destination). Buffering is set to 60 seconds / 5 MB — whichever threshold hits first triggers a flush. The role ARN references the [Firehose IAM Role](#7-firehose-iam-role) defined above. Corresponds to **Step 4** in the console guide.
 
 ```hcl
 resource "aws_kinesis_firehose_delivery_stream" "aqi_batch" {
@@ -1609,9 +2223,9 @@ resource "aws_kinesis_firehose_delivery_stream" "aqi_batch" {
 }
 ```
 
-## Terraform: Glue Crawler Role
+### 9. Glue Crawler Role
 
-Creates the IAM role that both Glue Crawlers (`Raw_Crawler` and `aqi_measurements_crawler`) assume. The trust policy allows `glue.amazonaws.com` to assume this role. The inline policy grants scoped access to read S3 objects under `aqi_pipeline/*`, write to the Glue Data Catalog, and emit CloudWatch Logs. Corresponds to **Phase 5, step 5.1** in the console guide.
+Creates the IAM role that both Glue Crawlers (`Raw_Crawler` and `aqi_measurements_crawler`) assume. The trust policy allows `glue.amazonaws.com` to assume this role. The inline policy grants scoped access to read S3 objects under `aqi_pipeline/*`, write to the Glue Data Catalog, and emit CloudWatch Logs. Corresponds to **Step 5, step 5.1** in the console guide.
 
 ```hcl
 resource "aws_iam_role" "glue_crawler_role" {
@@ -1646,8 +2260,8 @@ resource "aws_iam_role_policy" "glue_crawler_access" {
         Effect = "Allow"
         Action = ["s3:GetObject", "s3:ListBucket"]
         Resource = [
-          "arn:aws:s3:::aqi-pipeline-bucket",
-          "arn:aws:s3:::aqi-pipeline-bucket/aqi_pipeline/*"
+          aws_s3_bucket.pipeline_bucket.arn,
+          "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/*"
         ]
       },
       {
@@ -1665,16 +2279,16 @@ resource "aws_iam_role_policy" "glue_crawler_access" {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:eu-west-2:*:*"
+        Resource = "arn:aws:logs:*:*:*"
       }
     ]
   })
 }
 ```
 
-## Terraform: Glue Database (Raw)
+### 10. Glue Database (Raw)
 
-Creates the Glue Data Catalog database for the raw Firehose output. The `Raw_Crawler` writes table definitions into this database, and Athena queries reference it as `aqi_db`. Corresponds to the Glue database creation step in **Phase 5** of the console guide.
+Creates the Glue Data Catalog database for the raw Firehose output. The `Raw_Crawler` writes table definitions into this database, and Athena queries reference it as `aqi_db`. Corresponds to the Glue database creation step in **Step 5** of the console guide.
 
 ```hcl
 resource "aws_glue_catalog_database" "aqi_raw_db" {
@@ -1682,9 +2296,9 @@ resource "aws_glue_catalog_database" "aqi_raw_db" {
 }
 ```
 
-## Terraform: Glue Crawler (Raw)
+### 11. Glue Crawler (Raw)
 
-Defines a Glue Crawler that scans the raw Firehose output in `s3://aqi-pipeline-bucket/aqi_pipeline/rawingestion/` and registers the discovered schema in the `aqi_db` database. Uses the [Glue Crawler Role](#terraform-glue-crawler-role) defined above. Corresponds to the crawler setup step in **Phase 5** of the console guide.
+Defines a Glue Crawler that scans the raw Firehose output in the pipeline bucket's `aqi_pipeline/rawingestion/` prefix and registers the discovered schema in the `aqi_db` database. Uses the [Glue Crawler Role](#9-glue-crawler-role) defined above. Corresponds to the crawler setup step in **Step 5** of the console guide.
 
 ```hcl
 resource "aws_glue_crawler" "aqi_raw_crawler" {
@@ -1693,7 +2307,7 @@ resource "aws_glue_crawler" "aqi_raw_crawler" {
   database_name = aws_glue_catalog_database.aqi_raw_db.name
 
   s3_target {
-    path = "s3://aqi-pipeline-bucket/aqi_pipeline/rawingestion/"
+    path = "s3://${aws_s3_bucket.pipeline_bucket.bucket}/aqi_pipeline/rawingestion/"
   }
 
   configuration = jsonencode({
@@ -1705,13 +2319,13 @@ resource "aws_glue_crawler" "aqi_raw_crawler" {
 }
 ```
 
-## Terraform: Flink IAM Role
+### 12. Flink IAM Role
 
-Defines the execution role that the Flink Studio Notebook assumes at runtime, plus a scoped inline policy granting exactly the permissions Flink needs: read/write on both Kinesis streams, S3 access limited to the `aqi_pipeline/*` prefix, Glue Catalog lookups for table metadata, and CloudWatch Logs for notebook diagnostics. The role name follows the auto-generated console convention (`kinesis-analytics-<app>-<region>_<owner>`) so it matches what you'd see after manual creation. **Note:** Because this creates an IAM role, it must be provisioned by your DevOps team per corporate policy — flag this block in your merge request. Corresponds to **Phase 6** in the console guide.
+Defines the execution role that the Flink Studio Notebook assumes at runtime, plus a scoped inline policy granting exactly the permissions Flink needs: read/write on both Kinesis streams, S3 access limited to the `aqi_pipeline/*` prefix, Glue Catalog lookups for table metadata, and CloudWatch Logs for notebook diagnostics. The role name follows the auto-generated console convention (`kinesis-analytics-<app>-<region>_<owner>`) so it matches what you'd see after manual creation. **Note:** Because this creates an IAM role, it must be provisioned by your DevOps team per corporate policy — flag this block in your merge request. Corresponds to **Step 6** in the console guide.
 
 ```hcl
 resource "aws_iam_role" "flink_notebook_role" {
-  name = "kinesis-analytics-AQI_Analytics-eu-west-2"
+  name = "kinesis-analytics-AQI_Analytics"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -1748,8 +2362,8 @@ resource "aws_iam_role_policy" "flink_scoped_access" {
           "kinesis:PutRecords", "kinesis:SubscribeToShard", "kinesis:ListStreams"
         ]
         Resource = [
-          "arn:aws:kinesis:eu-west-2:*:stream/AQI_Stream",
-          "arn:aws:kinesis:eu-west-2:*:stream/AQI_Logs"
+          aws_kinesis_stream.aqi_stream.arn,
+          aws_kinesis_stream.aqi_logs.arn
         ]
       },
       {
@@ -1760,8 +2374,8 @@ resource "aws_iam_role_policy" "flink_scoped_access" {
           "s3:GetBucketLocation", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"
         ]
         Resource = [
-          "arn:aws:s3:::aqi-pipeline-bucket",
-          "arn:aws:s3:::aqi-pipeline-bucket/aqi_pipeline/*"
+          aws_s3_bucket.pipeline_bucket.arn,
+          "${aws_s3_bucket.pipeline_bucket.arn}/aqi_pipeline/*"
         ]
       },
       {
@@ -1780,16 +2394,16 @@ resource "aws_iam_role_policy" "flink_scoped_access" {
           "logs:CreateLogGroup", "logs:CreateLogStream",
           "logs:PutLogEvents", "logs:DescribeLogStreams"
         ]
-        Resource = "arn:aws:logs:eu-west-2:*:log-group:/aws/kinesis-analytics/*"
+        Resource = "arn:aws:logs:*:*:log-group:/aws/kinesis-analytics/*"
       }
     ]
   })
 }
 ```
 
-## Terraform: Flink Studio Notebook
+### 13. Flink Studio Notebook
 
-Creates the Amazon Managed Service for Apache Flink application (Terraform resource `kinesisanalyticsv2_application` — the resource name still uses the pre-2023 naming) that runs your Zeppelin notebook. Uses the [Flink IAM Role](#terraform-flink-iam-role) defined above. The `ZEPPELIN-FLINK-3_0` runtime gives you an interactive SQL environment backed by Flink 1.15. Checkpointing is set to 10-second intervals with CUSTOM configuration so Flink periodically flushes state — this is what makes the S3 sink produce Parquet files at a predictable cadence. The `text_content` placeholder is replaced when you deploy actual notebook paragraphs. Corresponds to **Phase 7** in the console guide.
+Creates the Amazon Managed Service for Apache Flink application (Terraform resource `kinesisanalyticsv2_application` — the resource name still uses the pre-2023 naming) that runs your Zeppelin notebook. Uses the [Flink IAM Role](#12-flink-iam-role) defined above. The `ZEPPELIN-FLINK-3_0` runtime gives you an interactive SQL environment backed by Flink 1.15. Checkpointing is set to 10-second intervals with CUSTOM configuration so Flink periodically flushes state — this is what makes the S3 sink produce Parquet files at a predictable cadence. The `text_content` placeholder is replaced when you deploy actual notebook paragraphs. Corresponds to **Step 7** in the console guide.
 
 ```hcl
 resource "aws_kinesisanalyticsv2_application" "aqi_analytics" {
@@ -1825,9 +2439,9 @@ resource "aws_kinesisanalyticsv2_application" "aqi_analytics" {
 }
 ```
 
-## Terraform: Glue Database (Analytical)
+### 14. Glue Database (Analytical)
 
-Creates the Glue Data Catalog database that stores table metadata for the Flink enriched output. The Glue Crawler (next block) writes table definitions into this database, and Athena queries reference it as `aqi_pipeline_db`. Corresponds to the Glue database creation step in **Phase 9** of the console guide.
+Creates the Glue Data Catalog database that stores table metadata for the Flink enriched output. The Glue Crawler (next block) writes table definitions into this database, and Athena queries reference it as `aqi_pipeline_db`. Corresponds to the Glue database creation step in **Step 9** of the console guide.
 
 ```hcl
 resource "aws_glue_catalog_database" "aqi_db" {
@@ -1835,9 +2449,9 @@ resource "aws_glue_catalog_database" "aqi_db" {
 }
 ```
 
-## Terraform: Glue Crawler (Analytical)
+### 15. Glue Crawler (Analytical)
 
-Defines a Glue Crawler that scans the Flink Parquet output in `s3://aqi-pipeline-bucket/aqi_pipeline/flink_output/co-measurements/` and registers the discovered schema in the `aqi_pipeline_db` database. The `CombineCompatibleSchemas` grouping policy merges partitions with compatible schemas into a single table, which simplifies Athena queries. Uses the [Glue Crawler Role](#terraform-glue-crawler-role) defined above. Corresponds to the crawler setup step in **Phase 9** of the console guide.
+Defines a Glue Crawler that scans the Flink Parquet output in the pipeline bucket's `aqi_pipeline/flink_output/co-measurements/` prefix and registers the discovered schema in the `aqi_pipeline_db` database. The `CombineCompatibleSchemas` grouping policy merges partitions with compatible schemas into a single table, which simplifies Athena queries. Uses the [Glue Crawler Role](#9-glue-crawler-role) defined above. Corresponds to the crawler setup step in **Step 9** of the console guide.
 
 ```hcl
 resource "aws_glue_crawler" "aqi_measurements" {
@@ -1846,7 +2460,7 @@ resource "aws_glue_crawler" "aqi_measurements" {
   database_name = aws_glue_catalog_database.aqi_db.name
 
   s3_target {
-    path = "s3://aqi-pipeline-bucket/aqi_pipeline/flink_output/co-measurements/"
+    path = "s3://${aws_s3_bucket.pipeline_bucket.bucket}/aqi_pipeline/flink_output/co-measurements/"
   }
 
   configuration = jsonencode({
@@ -1858,9 +2472,9 @@ resource "aws_glue_crawler" "aqi_measurements" {
 }
 ```
 
-## Terraform: CloudWatch Log Group + Stream
+### 16. CloudWatch Log Group + Stream
 
-Creates the CloudWatch Log Group (`/aws/lambda/Logs_to_Cloud_Watch`) and a named stream (`AQI_Logs_Stream`) inside it. The monitoring Lambda writes decoded Kinesis records here so you can inspect Flink's aggregation output in the CloudWatch console. Retention is set to `0` (retain forever) — change this to 30 or 90 days in production to control storage costs. Corresponds to the CloudWatch setup in **Phase 10** of the console guide.
+Creates the CloudWatch Log Group (`/aws/lambda/Logs_to_Cloud_Watch`) and a named stream (`AQI_Logs_Stream`) inside it. The monitoring Lambda writes decoded Kinesis records here so you can inspect Flink's aggregation output in the CloudWatch console. Retention is set to `0` (retain forever) — change this to 30 or 90 days in production to control storage costs. Corresponds to the CloudWatch setup in **Step 10** of the console guide.
 
 ```hcl
 resource "aws_cloudwatch_log_group" "aqi_logs_to_cloudwatch" {
@@ -1880,9 +2494,9 @@ resource "aws_cloudwatch_log_stream" "aqi_logs_stream" {
 }
 ```
 
-## Terraform: SNS Topic + Subscription
+### 17. SNS Topic + Subscription
 
-Creates an SNS topic (`Records_SNS`) and an email subscription. The monitoring Lambda publishes a notification to this topic every time it processes a batch from the `AQI_Logs` stream, giving you real-time email alerts that the pipeline is active. The email endpoint is a placeholder — replace it with your actual address. Corresponds to the SNS setup in **Phase 10** of the console guide.
+Creates an SNS topic (`Records_SNS`) and an email subscription. The monitoring Lambda publishes a notification to this topic every time it processes a batch from the `AQI_Logs` stream, giving you real-time email alerts that the pipeline is active. The email endpoint is a placeholder — replace it with your actual address. Corresponds to the SNS setup in **Step 10** of the console guide.
 
 ```hcl
 resource "aws_sns_topic" "aqi_records_sns" {
@@ -1898,20 +2512,20 @@ resource "aws_sns_topic" "aqi_records_sns" {
 resource "aws_sns_topic_subscription" "aqi_email" {
   topic_arn = aws_sns_topic.aqi_records_sns.arn
   protocol  = "email"
-  endpoint  = "your-email@bookingholdings.com"  # ← Replace with actual email
+  endpoint  = "<YOUR_EMAIL>"  # Replace with your notification email address
 }
 ```
 
 > **Note:** Terraform creates the subscription, but the email confirmation step still requires a human clicking the link.
 
-## Terraform: Lambda CloudWatch + SNS Policy
+### 18. Lambda CloudWatch + SNS Policy
 
-Attaches an inline IAM policy to the monitoring Lambda's execution role, granting it exactly three capabilities: read from the `AQI_Logs` Kinesis stream (so the event-source mapping can poll), write to the CloudWatch Log Group, and publish to the SNS topic. The role `aqi_lambda_execution_role`. **Note:** Because this modifies an IAM policy, it must be provisioned by your DevOps team per corporate policy. Corresponds to the IAM policy step in **Phase 10** of the console guide.
+Attaches an inline IAM policy to the monitoring Lambda's execution role, granting it exactly three capabilities: read from the `AQI_Logs` Kinesis stream (so the event-source mapping can poll), write to the CloudWatch Log Group, and publish to the SNS topic. The role `aqi_lambda_execution_role`. **Note:** Because this modifies an IAM policy, it must be provisioned by your DevOps team per corporate policy. Corresponds to the IAM policy step in **Step 10** of the console guide.
 
 ```hcl
 resource "aws_iam_role_policy" "lambda_cloudwatch_sns" {
   name = "lambda-cloudwatch-sns-aqi-access"
-  role = "aqi_lambda_execution_role"
+  role = aws_iam_role.lambda_execution_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1923,7 +2537,7 @@ resource "aws_iam_role_policy" "lambda_cloudwatch_sns" {
           "kinesis:GetRecords", "kinesis:GetShardIterator", "kinesis:DescribeStream",
           "kinesis:DescribeStreamSummary", "kinesis:ListShards", "kinesis:ListStreams"
         ]
-        Resource = ["arn:aws:kinesis:eu-west-2:*:stream/AQI_Logs"]
+        Resource = [aws_kinesis_stream.aqi_logs.arn]
       },
       {
         Sid    = "CloudWatchLogsWrite"
@@ -1933,8 +2547,8 @@ resource "aws_iam_role_policy" "lambda_cloudwatch_sns" {
           "logs:PutLogEvents", "logs:DescribeLogStreams"
         ]
         Resource = [
-          "arn:aws:logs:eu-west-2:*:log-group:/aws/lambda/Logs_to_Cloud_Watch",
-          "arn:aws:logs:eu-west-2:*:log-group:/aws/lambda/Logs_to_Cloud_Watch:*"
+          "arn:aws:logs:*:*:log-group:/aws/lambda/Logs_to_Cloud_Watch",
+          "arn:aws:logs:*:*:log-group:/aws/lambda/Logs_to_Cloud_Watch:*"
         ]
       },
       {
@@ -1948,14 +2562,14 @@ resource "aws_iam_role_policy" "lambda_cloudwatch_sns" {
 }
 ```
 
-## Terraform: Lambda Monitor Function
+### 19. Lambda Monitor Function
 
-Deploys the `kinesis_to_cloudwatch_lambda` function that reads batches from `AQI_Logs`, writes each record to the CloudWatch Log Group, and publishes an SNS notification per batch. Uses the [Lambda Execution Role](#terraform-lambda-execution-role) (with the additional [CloudWatch + SNS Policy](#terraform-lambda-cloudwatch--sns-policy) attached above). The `SNS_TOPIC_ARN` environment variable is set dynamically from the [SNS Topic](#terraform-sns-topic--subscription). The function uses Python 3.13 on `arm64` (Graviton) for lower cost and better cold-start performance. You'll need to zip `kinesis_to_cloudwatch_lambda.py` and place it alongside your `.tf` file. The role ARN contains a placeholder `<ACCOUNT_ID>` — replace it with your 12-digit AWS account ID. Corresponds to the Lambda creation step in **Phase 10** of the console guide.
+Deploys the `kinesis_to_cloudwatch_lambda` function that reads batches from `AQI_Logs`, writes each record to the CloudWatch Log Group, and publishes an SNS notification per batch. Uses the [Lambda Execution Role](#4-lambda-execution-role) (with the additional [CloudWatch + SNS Policy](#18-lambda-cloudwatch--sns-policy) attached above). The `SNS_TOPIC_ARN` environment variable is set dynamically from the [SNS Topic](#17-sns-topic--subscription). The function uses Python 3.13 on `arm64` (Graviton) for lower cost and better cold-start performance. You'll need to zip `kinesis_to_cloudwatch_lambda.py` and place it alongside your `.tf` file before running `terraform apply`. Corresponds to the Lambda creation step in **Step 10** of the console guide.
 
 ```hcl
 resource "aws_lambda_function" "logs_to_cloudwatch" {
   function_name    = "Logs_to_Cloud_Watch"
-  role             = "arn:aws:iam::<ACCOUNT_ID>:role/aqi_lambda_execution_role"
+  role             = aws_iam_role.lambda_execution_role.arn
   handler          = "kinesis_to_cloudwatch_lambda.lambda_handler"
   runtime          = "python3.13"
   architectures    = ["arm64"]
@@ -1978,9 +2592,9 @@ resource "aws_lambda_function" "logs_to_cloudwatch" {
 }
 ```
 
-## Terraform: Kinesis Trigger
+### 20. Kinesis → Lambda Trigger
 
-Creates an event-source mapping that connects the `AQI_Logs` Kinesis stream to the monitoring Lambda. `TRIM_HORIZON` means the Lambda processes records from the oldest available, ensuring nothing is missed on first deploy. The `batch_size` of 100 balances throughput against invocation cost. This is the final wiring step — once applied, records flowing through Flink into `AQI_Logs` automatically trigger the monitoring Lambda. Corresponds to the trigger configuration in **Phase 10** of the console guide.
+Creates an event-source mapping that connects the `AQI_Logs` Kinesis stream to the monitoring Lambda. `TRIM_HORIZON` means the Lambda processes records from the oldest available, ensuring nothing is missed on first deploy. The `batch_size` of 100 balances throughput against invocation cost. This is the final wiring step — once applied, records flowing through Flink into `AQI_Logs` automatically trigger the monitoring Lambda. Corresponds to the trigger configuration in **Step 10** of the console guide.
 
 ```hcl
 resource "aws_lambda_event_source_mapping" "kinesis_aqi_logs_trigger" {
@@ -1992,9 +2606,9 @@ resource "aws_lambda_event_source_mapping" "kinesis_aqi_logs_trigger" {
 }
 ```
 
-## Terraform: Grafana Role Policy
+### 21. Grafana IAM Role
 
-Creates an IAM role for the Grafana workspace with the `AmazonGrafanaCloudWatchAccess` managed policy attached. This role allows Grafana to read CloudWatch Logs and Metrics in the pipeline region. Like other IAM resources in this pipeline, this is provisioned by DevOps. Corresponds to the role verification in **Phase 11, step 12.4**.
+Creates an IAM role for the Grafana workspace with the `AmazonGrafanaCloudWatchAccess` managed policy attached. This role allows Grafana to read CloudWatch Logs and Metrics in the pipeline region. Like other IAM resources in this pipeline, this is provisioned by DevOps. Corresponds to the role verification in **Step 11, step 12.4**.
 
 > **DevOps note:** This role is created automatically when the workspace is provisioned through the console, but must be explicitly defined in Terraform.
 
@@ -2022,32 +2636,9 @@ resource "aws_iam_role_policy_attachment" "grafana_cloudwatch" {
 }
 ```
 
-## Parameterization Note
+### 22. Grafana Workspace
 
-The Terraform blocks above contain several hardcoded values that you **must** replace before applying to your own environment:
-
-| Hardcoded Value | Where It Appears | Replace With |
-|---|---|---|
-| `aqi-pipeline-bucket` | S3 data source, Glue Crawler targets, Flink IAM policy, Firehose destination | Your actual S3 bucket name |
-| `<ACCOUNT_ID>` | Lambda Monitor Function role ARN | Your 12-digit AWS account ID |
-| `your-email@bookingholdings.com` | SNS email subscription | Your actual notification email address |
-| `eu-west-2` | Provider block, IAM policy resource ARNs, Firehose role name | Your target AWS region (if different) |
-| `kinesis-analytics-AQI_Analytics-eu-west-2` | Flink IAM role name | A role name that follows your team's naming convention |
-| `KinesisFirehoseServiceRole-AQI_Batch-eu-west-2` | Firehose IAM role name | A role name that follows your team's naming convention |
-| `aqi_lambda_execution_role` | Lambda Execution Role, Lambda Monitor Function | Created by the Lambda Execution Role block — rename if needed |
-| `aqi-glue-crawler-role` | Glue Crawler Role | Created by the Glue Crawler Role block — rename if needed |
-| `AQI-Grafana-Role` | Grafana workspace role | A role name that follows your team's naming convention |
-
-> **Tip:** Extract these into Terraform variables (`variable "bucket_name" { ... }`) in a `variables.tf` file to make the configuration reusable across environments. Provide defaults for non-sensitive values (region, role names) and mark sensitive values like account IDs with `sensitive = true`.
-
-> **Testing your Terraform:** Before applying to a shared account, run `terraform plan` and review every resource that will be created. Pay special attention to IAM resources — the Flink IAM Role and Lambda CloudWatch + SNS Policy blocks create IAM policies with broad `Resource` patterns (`*` for Glue, wildcards for logs). In production, narrow these to specific ARNs.
-> For a dry-run validation without AWS credentials, `terraform validate` checks HCL syntax and internal reference consistency.
-
-&nbsp;
-
-## Terraform: Grafana Workspace
-
-Creates an Amazon Managed Grafana workspace with IAM Identity Center authentication and CloudWatch as a data source. Uses the [Grafana Role Policy](#terraform-grafana-role-policy) defined above. The workspace provides a browser-based dashboard environment for visualizing pipeline metrics. The `CURRENT_ACCOUNT` data source scope means Grafana can access CloudWatch data within the same AWS account. This is a DevOps-provisioned resource — the developer role's permissions boundary must explicitly allow `grafana:*` actions. Corresponds to **Phase 11** of the console guide.
+Creates an Amazon Managed Grafana workspace with IAM Identity Center authentication and CloudWatch as a data source. Uses the [Grafana IAM Role](#21-grafana-iam-role) defined above. The workspace provides a browser-based dashboard environment for visualizing pipeline metrics. The `CURRENT_ACCOUNT` data source scope means Grafana can access CloudWatch data within the same AWS account. This is a DevOps-provisioned resource — the developer role's permissions boundary must explicitly allow `grafana:*` actions. Corresponds to **Step 11** of the console guide.
 
 > **DevOps note:** The `grafana:*` actions must be added to the developer role's permissions boundary before the workspace can be created or accessed. This is an explicit deny override — standard policy attachments are insufficient.
 
@@ -2062,5 +2653,7 @@ resource "aws_grafana_workspace" "aqi_logs_dashboard" {
   role_arn = aws_iam_role.grafana_role.arn
 }
 ```
+
+> **Before `terraform apply`:** Replace the two placeholders in the blocks above — `<UNIQUE_SUFFIX>` (S3 bucket name suffix, since bucket names are globally unique) and `<YOUR_EMAIL>` (SNS email subscription) — and update the provider `region` if you're deploying outside `eu-west-2`. Every other AWS resource references are resolved automatically by Terraform at plan time. Run `terraform validate` for a syntax-only check and `terraform plan` to preview the graph before applying.
 
 

@@ -1,9 +1,8 @@
-<div align="center"><strong style="font-size:2em">CoinGecko ETL Pipeline — AWS & Snowflake Setup Guide</strong></div>
+# CoinGecko ETL Pipeline — AWS & Snowflake
 
+**Topic:** Building an ETL pipeline on AWS that extracts CoinGecko cryptocurrency data, transforms it via Lambda, and loads it into Snowflake via Snowpipe
 
-&nbsp;
-
-# Section 1: Architecture
+![S3-to-Snowflake pipeline architecture — API extraction through S3, Lambda, and Snowflake loading](docs/diagrams/s3_to_snowflake_architecture.svg)
 
 This pipeline ingests cryptocurrency market data from the **CoinGecko API** every 5 minutes, transforms it into normalized CSVs when an S3 event notification triggers the transform Lambda, and loads them into Snowflake automatically via Snowpipe.
 
@@ -15,23 +14,65 @@ The pipeline uses:
 - **Amazon SQS** — a message queue that bridges AWS and Snowflake
 - **Snowpipe** — Snowflake's auto-ingestion service that loads files from S3 into tables
 
-&nbsp;
-
-## Architecture Overview
-
-![S3-to-Snowflake pipeline architecture — API extraction through S3, Lambda, and Snowflake loading](diagrams/s3_to_snowflake_architecture.svg)
-
 
 &nbsp;
 
 ## Data Flow
 
-1. **Lambda** (`coingecko_api_data_extract`) fetches coin data from the CoinGecko API and saves the raw JSON to S3
-   - Trigger: **EventBridge Scheduler** every 5 minutes
-2. **Lambda** (`coingecko_api_data_transform`) reads the JSON, applies transformations, and splits it into 3 normalized CSVs (idempotent — each file is processed exactly once)
-   - Trigger: **S3 Event Notification** when new `.json` files land in `raw_data/to_process/`
-3. **Snowpipe** runs `COPY INTO` to load each CSV into the corresponding landing table in Snowflake (`COINGECKO_DB.landing`)
-   - Trigger: **SQS** messages sent by a second S3 Event Notification when new `.csv` files land in `transformed_data/`
+```
+1. EXTRACT    EventBridge Scheduler fires every 5 minutes
+                → triggers Lambda `coingecko_api_data_extract`
+                → fetches coin data from the CoinGecko API (top 50 coins by market cap)
+                → writes raw JSON to S3: <bucket>/raw_data/to_process/
+
+2. TRANSFORM  S3 Event Notification (`lambda-transform-trigger`) detects new .json files in raw_data/to_process/
+                → invokes Lambda `coingecko_api_data_transform`
+                → applies transformations (symbol normalization, market cap tiers, price ratios, extraction timestamp)
+                → splits data into 3 CSVs and writes to S3: <bucket>/transformed_data/{coin_data,market_data,price_data}/
+                → moves source JSON to <bucket>/raw_data/processed/ (idempotent — each file is processed exactly once)
+
+3. NOTIFY     S3 Event Notification (`snowpipe-coingecko-autoload`) detects new .csv files in transformed_data/
+                → publishes messages to the Snowflake-managed SQS queue
+
+4. LOAD       Snowpipe (3 pipes: coin_data_pipe, market_data_pipe, price_data_pipe) with AUTO_INGEST=TRUE
+                → polls the shared SQS queue continuously
+                → runs COPY INTO for each new CSV
+                → appends rows to Snowflake landing tables: COINGECKO_DB.landing.{coin_data,market_data,price_data}
+```
+
+&nbsp;
+
+## S3 Bucket Layout
+
+```
+coingecko-etl-bucket/
+├── raw_data/                                         ← Raw JSON staging area from the CoinGecko API
+│   ├── to_process/                                   ← Extract Lambda writes here; transform Lambda reads here (inbox)
+│   └── processed/                                    ← Transform Lambda moves JSON here after processing (archive)
+└── transformed_data/                                 ← Normalized CSVs from transform Lambda (Snowpipe loads these)
+    ├── coin_data/                                    ← Coin identity CSVs → Snowflake table: coin_data
+    ├── market_data/                                  ← Market metrics CSVs → Snowflake table: market_data
+    └── price_data/                                   ← Price details CSVs → Snowflake table: price_data
+```
+
+> **Note — why two `raw_data/` folders?** `to_process/` acts as an inbox for the transform Lambda (new JSON files trigger it); `processed/` acts as an archive so the same file is never reprocessed.
+
+&nbsp;
+
+## AWS Services Used
+
+| Service | Role in Pipeline |
+|---------|-----------------|
+| **S3** (`coingecko-etl-bucket`) | Object storage for raw JSON, transformed CSVs, and archived files |
+| **Lambda** (`coingecko_api_data_extract`) | Calls CoinGecko API, writes raw JSON to S3 |
+| **EventBridge Scheduler** | Invokes extract Lambda every 5 minutes |
+| **Lambda** (`coingecko_api_data_transform`) | Parses JSON, applies transformations, splits into 3 CSVs |
+| **S3 Event Notifications** | Triggers transform Lambda on new JSON; notifies Snowpipe SQS on new CSVs |
+| **SQS** | Bridge between AWS and Snowflake — notifies Snowpipe that new CSVs are ready for loading |
+| **Snowpipe** (3 pipes) | Auto-ingests CSVs from S3 into Snowflake landing tables |
+| **Snowflake** (`COINGECKO_DB.landing`) | Data warehouse — 3 landing tables for coin, market, and price data |
+| **IAM** (`coingecko_lambda_role`) | Shared execution role for both Lambda functions |
+| **CloudWatch Logs** | Automatic logging for Lambda executions |
 
 &nbsp;
 
@@ -54,51 +95,7 @@ The pipeline uses:
 
 &nbsp;
 
-## Services Used
-
-| Service | Role in Pipeline |
-|---------|-----------------|
-| **S3** (`coingecko-etl-bucket`) | Object storage for raw JSON, transformed CSVs, and archived files |
-| **Lambda** (`coingecko_api_data_extract`) | Calls CoinGecko API, writes raw JSON to S3 |
-| **EventBridge Scheduler** | Invokes extract Lambda every 5 minutes |
-| **Lambda** (`coingecko_api_data_transform`) | Parses JSON, applies transformations, splits into 3 CSVs |
-| **S3 Event Notifications** | Triggers transform Lambda on new JSON; notifies Snowpipe SQS on new CSVs |
-| **SQS** | Bridge between AWS and Snowflake — notifies Snowpipe that new CSVs are ready for loading |
-| **Snowpipe** (3 pipes) | Auto-ingests CSVs from S3 into Snowflake landing tables |
-| **Snowflake** (`COINGECKO_DB.landing`) | Data warehouse — 3 landing tables for coin, market, and price data |
-| **IAM** (`coingecko_lambda_role`) | Shared execution role for both Lambda functions |
-| **CloudWatch Logs** | Automatic logging for Lambda executions |
-
-&nbsp;
-
-## S3 Bucket Structure
-
-```
-coingecko-etl-bucket/
-├── raw_data/
-│   ├── to_process/     ← extract Lambda writes raw JSON here
-│   └── processed/      ← transform Lambda moves JSON here after processing
-└── transformed_data/
-    ├── coin_data/       ← coin identity CSVs
-    ├── market_data/     ← market metrics CSVs
-    └── price_data/      ← price details CSVs
-```
-
-### Why two raw_data folders?
-- `to_process/` acts as an inbox — new files land here and trigger the transform Lambda
-- `processed/` acts as an archive — files move here after transformation so they are not processed twice
-
-&nbsp;
-
-# Section 2: Step-by-Step AWS Console Guide
-
-This section walks you through creating every **AWS** resource in the pipeline using the AWS Management Console. Each phase builds on the previous one, and most steps include a cross-reference to the equivalent Terraform block in [Section 4](#section-4-terraform-configurations).
-
-> **Scope:** This section covers only AWS resources — S3, IAM, Lambda, EventBridge, and S3 Event Notifications. Snowflake resources (database, schema, tables, pipes, storage integration) are created in Snowsight and are covered in [Section 3](#section-3-snowflake-setup-snowsight).
-
-&nbsp;
-
-## Phase 1: S3 Bucket + Folder Structure
+## Step 1: S3 Bucket + Folder Structure
 
 ### 1.1 — Create the S3 Bucket
 
@@ -107,7 +104,13 @@ This section walks you through creating every **AWS** resource in the pipeline u
 3. Region: **eu-west-2** (must match all other resources)
 4. Leave remaining settings as default → Click **Create bucket**
 
-> Terraform: [S3 Bucket + Prefixes](#terraform-s3-bucket--prefixes)
+Or via CLI:
+
+```bash
+aws s3 mb s3://coingecko-etl-bucket --region eu-west-2
+```
+
+> Terraform: [1. S3 Bucket + Folder Prefixes](#1-s3-bucket--folder-prefixes)
 
 ### 1.2 — Create the Folder Prefixes
 
@@ -119,13 +122,24 @@ This section walks you through creating every **AWS** resource in the pipeline u
    - `transformed_data/market_data/`
    - `transformed_data/price_data/`
 
+Or via CLI:
+
+```bash
+# S3 has no real folders — zero-byte objects with trailing slashes establish the prefixes
+aws s3api put-object --bucket coingecko-etl-bucket --key raw_data/to_process/
+aws s3api put-object --bucket coingecko-etl-bucket --key raw_data/processed/
+aws s3api put-object --bucket coingecko-etl-bucket --key transformed_data/coin_data/
+aws s3api put-object --bucket coingecko-etl-bucket --key transformed_data/market_data/
+aws s3api put-object --bucket coingecko-etl-bucket --key transformed_data/price_data/
+```
+
 > **Note:** S3 has no real folders — these are zero-byte objects that establish the prefixes. The pipeline writes files under these prefixes.
 
-> Terraform: [S3 Bucket + Prefixes](#terraform-s3-bucket--prefixes)
+> Terraform: [1. S3 Bucket + Folder Prefixes](#1-s3-bucket--folder-prefixes)
 
 &nbsp;
 
-## Phase 2: IAM Role (coingecko_lambda_role)
+## Step 2: IAM Role (coingecko_lambda_role)
 
 Shared execution role for both Lambda functions. Needs S3 read/write on the pipeline bucket and CloudWatch Logs access.
 
@@ -140,30 +154,96 @@ Shared execution role for both Lambda functions. Needs S3 read/write on the pipe
 7. Role name: `coingecko_lambda_role`
 8. Click **Create role**
 
+Or via CLI:
+
+```bash
+# 1. Create a trust-policy file for Lambda
+cat > trust-policy-lambda.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "lambda.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+# 2. Create the role
+aws iam create-role \
+  --role-name coingecko_lambda_role \
+  --assume-role-policy-document file://trust-policy-lambda.json
+
+# 3. Attach the managed CloudWatch Logs policy
+aws iam attach-role-policy \
+  --role-name coingecko_lambda_role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+```
+
+**Trust policy (used above):**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "lambda.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
 ### 2.2 — Add S3 Access Policy
 
 1. Go to **IAM → Roles → `coingecko_lambda_role`**
 2. Click **Add permissions → Create inline policy**
 3. Switch to the **JSON** editor
-4. Paste the policy from [Terraform: IAM Lambda Role](#terraform-iam-lambda-role) — specifically the `lambda_s3_access` inline policy JSON. It grants `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:ListBucket` on `coingecko-etl-bucket`.
+4. Paste the JSON below — it grants `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:ListBucket` on `coingecko-etl-bucket`
 5. Policy name: `lambda-s3-coingecko-access`
 6. Click **Create policy**
 
-> Terraform: [IAM Lambda Role](#terraform-iam-lambda-role)
+**Inline policy JSON:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::coingecko-etl-bucket",
+        "arn:aws:s3:::coingecko-etl-bucket/*"
+      ]
+    }
+  ]
+}
+```
+
+Or via CLI:
+
+```bash
+# Save the policy above as lambda-s3-coingecko-access.json, then attach it inline
+aws iam put-role-policy \
+  --role-name coingecko_lambda_role \
+  --policy-name lambda-s3-coingecko-access \
+  --policy-document file://lambda-s3-coingecko-access.json
+```
+
+> Terraform: [2. IAM — Lambda Execution Role](#2-iam--lambda-execution-role)
 
 &nbsp;
 
-## Phase 3: Lambda Extract Function
+## Step 3: Lambda Extract Function
 
-### What it does
-1. Calls the CoinGecko public API (free, no API key required)
-2. Fetches the top 50 cryptocurrencies by market cap
-3. Saves the raw API response as a timestamped JSON file in S3
-
-### Output file example
-```
-s3://coingecko-etl-bucket/raw_data/to_process/coingecko_raw_20260401T112815.json
-```
+**Source file:** [`coingeecko_api_data_extract_lambda.py`](./docs/resources/coingeecko_api_data_extract_lambda.py)
 
 ### 3.1 — Create the Lambda Function
 
@@ -173,32 +253,58 @@ s3://coingecko-etl-bucket/raw_data/to_process/coingecko_raw_20260401T112815.json
 4. Runtime: **Python 3.12**
 5. Execution role: **Use an existing role** → select `coingecko_lambda_role`
 6. Click **Create function**
-7. In the code editor, paste the contents of `coingeecko_api_data_extract_lambda.py`
+7. In the code editor, paste the contents of [`coingeecko_api_data_extract_lambda.py`](./docs/resources/coingeecko_api_data_extract_lambda.py)
 8. Click **Deploy**
 9. Go to **Configuration → General configuration → Edit**:
    - Timeout: **60 seconds** (default 3s is too short for API calls)
    - Memory: **128 MB** (sufficient)
    - Click **Save**
 
-### Runtime
+Or via CLI:
+
+```bash
+# 1. Package the function (only needed for CLI/Terraform — not for console)
+zip coingecko_extract.zip coingeecko_api_data_extract_lambda.py
+
+# 2. Create the Lambda function (replace <ACCOUNT_ID>)
+aws lambda create-function \
+  --function-name coingecko_api_data_extract \
+  --runtime python3.12 \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/coingecko_lambda_role \
+  --handler coingeecko_api_data_extract_lambda.lambda_handler \
+  --zip-file fileb://coingecko_extract.zip \
+  --timeout 60 \
+  --memory-size 128 \
+  --region eu-west-2
+```
+
+> Terraform: [3. Lambda Extract Function + EventBridge Scheduler](#3-lambda-extract-function--eventbridge-scheduler)
+
+### What it does
+
+1. Calls the CoinGecko public API (free, no API key required)
+2. Fetches the top 50 cryptocurrencies by market cap
+3. Saves the raw API response as a timestamped JSON file in S3
+
+**Output file example:**
+```
+s3://coingecko-etl-bucket/raw_data/to_process/coingecko_raw_20260401T112815.json
+```
+
+### Runtime Configuration
+
 - **Runtime:** Python 3.12
 - **Memory:** 128 MB
 - **Timeout:** 60 seconds
 - **Execution role:** `coingecko_lambda_role`
-- **Source file:** `coingeecko_api_data_extract_lambda.py`
 - **Libraries used:** `urllib`, `boto3`, `json` — all built-in, no Lambda Layers needed
 
-### Packaging
+### Packaging for CI/CD
 
-The zip must be created before running `terraform apply`. The `handler` value follows the pattern `<filename_without_extension>.lambda_handler`.
+For Terraform or CI/CD deployments, the zip must be present on the machine running `terraform apply`. The `handler` value follows the pattern `<filename_without_extension>.lambda_handler`.
 
-**Manual (local):**
-```bash
-zip coingecko_extract.zip coingeecko_api_data_extract_lambda.py
-```
-
-**CI/CD (GitLab example):**
 ```yaml
+# GitLab CI example
 build:
   script:
     - zip coingecko_extract.zip coingeecko_api_data_extract_lambda.py
@@ -207,11 +313,9 @@ build:
       - coingecko_extract.zip
 ```
 
-> Terraform: [Lambda Extract + EventBridge](#terraform-lambda-extract--eventbridge)
-
 &nbsp;
 
-## Phase 4: EventBridge Scheduler
+## Step 4: EventBridge Scheduler
 
 The EventBridge Scheduler triggers the extract Lambda every 5 minutes.
 
@@ -224,15 +328,100 @@ The EventBridge Scheduler triggers the extract Lambda every 5 minutes.
 5. Target: **Lambda** → select `coingecko_api_data_extract`
 6. Click **Create schedule**
 
-> **Note:** EventBridge Scheduler needs its own IAM role to invoke Lambda. AWS creates this automatically when you create the schedule via the console. In Terraform, it must be declared explicitly.
+Or via CLI:
 
-> Terraform: [Lambda Extract + EventBridge](#terraform-lambda-extract--eventbridge)
+```bash
+# EventBridge Scheduler needs its own role to invoke Lambda — create one first.
+# In the console this is done automatically; via CLI it must be explicit.
+cat > trust-policy-scheduler.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "scheduler.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name coingecko_scheduler_invoke_role \
+  --assume-role-policy-document file://trust-policy-scheduler.json
+
+# Allow the role to invoke the extract Lambda
+aws iam put-role-policy \
+  --role-name coingecko_scheduler_invoke_role \
+  --policy-name scheduler-invoke-extract-lambda \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Action":"lambda:InvokeFunction",
+      "Resource":"arn:aws:lambda:eu-west-2:<ACCOUNT_ID>:function:coingecko_api_data_extract"
+    }]
+  }'
+
+# Create the schedule (replace <ACCOUNT_ID>)
+aws scheduler create-schedule \
+  --name coingecko-extract-every-5-minutes \
+  --schedule-expression "rate(5 minutes)" \
+  --flexible-time-window '{"Mode":"OFF"}' \
+  --target '{
+    "Arn":"arn:aws:lambda:eu-west-2:<ACCOUNT_ID>:function:coingecko_api_data_extract",
+    "RoleArn":"arn:aws:iam::<ACCOUNT_ID>:role/coingecko_scheduler_invoke_role"
+  }' \
+  --region eu-west-2
+```
+
+> **Note:** EventBridge Scheduler needs its own IAM role to invoke Lambda. AWS creates this automatically when you create the schedule via the console. In Terraform and via CLI, it must be declared explicitly (shown above).
+
+> Terraform: [3. Lambda Extract Function + EventBridge Scheduler](#3-lambda-extract-function--eventbridge-scheduler)
 
 &nbsp;
 
-## Phase 5: Lambda Transform Function
+## Step 5: Lambda Transform Function
+
+**Source file:** [`coingeecko_api_data_transform_lambda.py`](./docs/resources/coingeecko_api_data_transform_lambda.py)
+
+### 5.1 — Create the Lambda Function
+
+1. Go to **Lambda → Create function**
+2. **Author from scratch**
+3. Function name: `coingecko_api_data_transform`
+4. Runtime: **Python 3.12**
+5. Execution role: **Use an existing role** → select `coingecko_lambda_role`
+6. Click **Create function**
+7. In the code editor, paste the contents of [`coingeecko_api_data_transform_lambda.py`](./docs/resources/coingeecko_api_data_transform_lambda.py)
+8. Click **Deploy**
+9. Go to **Configuration → General configuration → Edit**:
+   - Timeout: **60 seconds**
+   - Memory: **128 MB**
+   - Click **Save**
+
+Or via CLI:
+
+```bash
+# 1. Package the function
+zip coingecko_transform.zip coingeecko_api_data_transform_lambda.py
+
+# 2. Create the Lambda function (replace <ACCOUNT_ID>)
+aws lambda create-function \
+  --function-name coingecko_api_data_transform \
+  --runtime python3.12 \
+  --role arn:aws:iam::<ACCOUNT_ID>:role/coingecko_lambda_role \
+  --handler coingeecko_api_data_transform_lambda.lambda_handler \
+  --zip-file fileb://coingecko_transform.zip \
+  --timeout 60 \
+  --memory-size 128 \
+  --region eu-west-2
+```
+
+> Terraform: [4. Lambda Transform Function](#4-lambda-transform-function)
 
 ### What it does
+
 1. Lists all `.json` files in `raw_data/to_process/`
 2. For each file, reads and parses the JSON
 3. Applies transformations (see below)
@@ -240,6 +429,7 @@ The EventBridge Scheduler triggers the extract Lambda every 5 minutes.
 5. Moves the original JSON from `to_process/` to `processed/`
 
 ### Transformations applied
+
 | Transformation | Description |
 |---|---|
 | Symbol uppercase | BTC, ETH, etc. |
@@ -288,42 +478,23 @@ The EventBridge Scheduler triggers the extract Lambda every 5 minutes.
 | last_updated | TIMESTAMP | CoinGecko last update time |
 | extracted_at | TIMESTAMP | Pipeline run timestamp |
 
-### 5.1 — Create the Lambda Function
+### Runtime Configuration
 
-1. Go to **Lambda → Create function**
-2. **Author from scratch**
-3. Function name: `coingecko_api_data_transform`
-4. Runtime: **Python 3.12**
-5. Execution role: **Use an existing role** → select `coingecko_lambda_role`
-6. Click **Create function**
-7. In the code editor, paste the contents of `coingeecko_api_data_transform_lambda.py`
-8. Click **Deploy**
-9. Go to **Configuration → General configuration → Edit**:
-   - Timeout: **60 seconds**
-   - Memory: **128 MB**
-   - Click **Save**
-
-### Runtime
 - **Runtime:** Python 3.12
 - **Memory:** 128 MB
 - **Timeout:** 60 seconds
 - **Execution role:** `coingecko_lambda_role`
-- **Source file:** `coingeecko_api_data_transform_lambda.py`
 - **Libraries used:** `json`, `csv`, `boto3`, `io`, `datetime` — all built-in, no Lambda Layers needed
 
 ### Trigger: S3 Event Notification
-- The transform Lambda is triggered automatically by the `lambda-transform-trigger` S3 event notification (configured in Phase 6)
+
+- The transform Lambda is triggered automatically by the `lambda-transform-trigger` S3 event notification (configured in Step 6)
 - After saving the notification in S3, the trigger automatically appears in the Lambda console after a few minutes (AWS propagation delay)
 
-### Packaging
+### Packaging for CI/CD
 
-**Manual (local):**
-```bash
-zip coingecko_transform.zip coingeecko_api_data_transform_lambda.py
-```
-
-**CI/CD (GitLab example):**
 ```yaml
+# GitLab CI example
 build:
   script:
     - zip coingecko_transform.zip coingeecko_api_data_transform_lambda.py
@@ -332,11 +503,9 @@ build:
       - coingecko_transform.zip
 ```
 
-> Terraform: [Lambda Transform](#terraform-lambda-transform)
-
 &nbsp;
 
-## Phase 6: S3 Event Notifications
+## Step 6: S3 Event Notifications
 
 Two notifications configured on `coingecko-etl-bucket`:
 
@@ -360,6 +529,62 @@ Two notifications configured on `coingecko-etl-bucket`:
 
 After saving, this notification automatically appears as a trigger in the Lambda console after a few minutes (AWS propagation delay).
 
+Or via CLI:
+
+> **Important:** Step 6.1 and 6.2 must be configured together. AWS replaces the entire bucket notification configuration on each `put-bucket-notification-configuration` call, so they must both be passed in a single JSON payload. The snippet below covers both.
+
+```bash
+# 1. Grant S3 permission to invoke the transform Lambda (required once, per account)
+aws lambda add-permission \
+  --function-name coingecko_api_data_transform \
+  --statement-id s3-invoke-transform \
+  --action lambda:InvokeFunction \
+  --principal s3.amazonaws.com \
+  --source-arn arn:aws:s3:::coingecko-etl-bucket \
+  --region eu-west-2
+
+# 2. Write the combined notification configuration (Steps 6.1 + 6.2 — replace <ACCOUNT_ID> and <SNOWPIPE_SQS_ARN>)
+cat > bucket-notification.json <<'EOF'
+{
+  "LambdaFunctionConfigurations": [
+    {
+      "Id": "lambda-transform-trigger",
+      "LambdaFunctionArn": "arn:aws:lambda:eu-west-2:<ACCOUNT_ID>:function:coingecko_api_data_transform",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [
+            { "Name": "prefix", "Value": "raw_data/to_process/" },
+            { "Name": "suffix", "Value": ".json" }
+          ]
+        }
+      }
+    }
+  ],
+  "QueueConfigurations": [
+    {
+      "Id": "snowpipe-coingecko-autoload",
+      "QueueArn": "<SNOWPIPE_SQS_ARN>",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [
+            { "Name": "prefix", "Value": "transformed_data/" },
+            { "Name": "suffix", "Value": ".csv" }
+          ]
+        }
+      }
+    }
+  ]
+}
+EOF
+
+# 3. Apply both notifications atomically
+aws s3api put-bucket-notification-configuration \
+  --bucket coingecko-etl-bucket \
+  --notification-configuration file://bucket-notification.json
+```
+
 ### 6.2 — Set up `snowpipe-coingecko-autoload`
 
 **Where:** S3 → `coingecko-etl-bucket` → Properties → Event notifications → Create event notification
@@ -373,54 +598,189 @@ After saving, this notification automatically appears as a trigger in the Lambda
 | Destination | SQS queue | Snowpipe listens to an SQS queue, not Lambda |
 | SQS ARN | *(from Snowflake `DESC PIPE` — see below)* | See below |
 
+> Via CLI: the notification is configured together with 6.1 above — one `put-bucket-notification-configuration` call covers both.
+
 **Where does the SQS ARN come from?**
 
-The SQS queue is created and managed by **Snowflake** (its AWS account, not yours). You get the ARN by running Step 6 in [`snowflake_setup.sql`](./snowflake_setup.sql):
+The SQS queue is created and managed by **Snowflake** (its AWS account, not yours). You get the ARN by running Step 6 in [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql):
 ```sql
 DESC PIPE COINGECKO_DB.landing.coin_data_pipe;
 ```
 The `notification_channel` column contains the SQS ARN. All three pipes share the same ARN since Snowflake uses one queue per account.
 
-> **Important:** You must complete Steps 1–6 of [`snowflake_setup.sql`](./snowflake_setup.sql) before configuring this notification, because the SQS ARN comes from the `DESC PIPE` output in Step 6.
+> **Important:** You must complete Steps 1–6 of [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql) before configuring this notification, because the SQS ARN comes from the `DESC PIPE` output in Step 6.
 
 ### 6.3 — Create the Snowflake S3 Access Role (coingecko_snowflake_role)
 
-This IAM role allows Snowflake's storage integration to read from the S3 bucket. It is referenced in [`snowflake_setup.sql`](./snowflake_setup.sql) Step 2 (`STORAGE_AWS_ROLE_ARN`).
+This IAM role allows Snowflake's storage integration to read from the S3 bucket. It is referenced in [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql) Step 2 (`STORAGE_AWS_ROLE_ARN`).
 
 1. Go to **IAM → Roles → Create role**
 2. Trusted entity type: **Custom trust policy**
-3. Paste the trust policy from [Terraform: IAM Snowflake S3 Role](#terraform-iam-snowflake-s3-role) — it allows Snowflake's IAM user to assume this role using an external ID
+3. Paste the trust policy JSON below — it allows Snowflake's IAM user to assume this role using an external ID. (The placeholder values `<SNOWFLAKE_IAM_USER_ARN>` and `<SNOWFLAKE_EXTERNAL_ID>` are filled in after you run Step 2 of [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql).)
 4. Click **Next**
 5. Do **not** attach any managed policies — the inline policy below provides the access
 6. Role name: `coingecko_snowflake_role`
 7. Click **Create role**
 8. Go to **IAM → Roles → `coingecko_snowflake_role`** → **Add permissions → Create inline policy**
-9. Paste the S3 read policy from [Terraform: IAM Snowflake S3 Role](#terraform-iam-snowflake-s3-role) — it grants `s3:GetObject`, `s3:GetObjectVersion`, and `s3:ListBucket` on `coingecko-etl-bucket`
+9. Paste the S3 read policy JSON below — it grants `s3:GetObject`, `s3:GetObjectVersion`, and `s3:ListBucket` on `coingecko-etl-bucket`
 10. Policy name: `snowflake-s3-coingecko-read`
 11. Click **Create policy**
 
-> **After creating the role:** Run Step 2 of [`snowflake_setup.sql`](./snowflake_setup.sql) to create the storage integration, then run `DESC INTEGRATION S3_COINGECKO_INTEGRATION;` to get the `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID` values. Update this role's trust policy with those values — replace `<SNOWFLAKE_IAM_USER_ARN>` and `<SNOWFLAKE_EXTERNAL_ID>` with the actual values from Snowflake.
+**Trust policy (with placeholders for Snowflake values):**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "<SNOWFLAKE_IAM_USER_ARN>" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "<SNOWFLAKE_EXTERNAL_ID>"
+        }
+      }
+    }
+  ]
+}
+```
 
-> Terraform: [IAM Snowflake S3 Role](#terraform-iam-snowflake-s3-role)
+**Inline S3 read policy:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::coingecko-etl-bucket",
+        "arn:aws:s3:::coingecko-etl-bucket/*"
+      ]
+    }
+  ]
+}
+```
+
+Or via CLI:
+
+```bash
+# 1. Save the trust policy (replace the two Snowflake placeholders after running snowflake_setup.sql Step 2)
+cat > trust-policy-snowflake.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "<SNOWFLAKE_IAM_USER_ARN>" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "sts:ExternalId": "<SNOWFLAKE_EXTERNAL_ID>" }
+      }
+    }
+  ]
+}
+EOF
+
+# 2. Create the role
+aws iam create-role \
+  --role-name coingecko_snowflake_role \
+  --assume-role-policy-document file://trust-policy-snowflake.json
+
+# 3. Attach the inline S3 read policy
+aws iam put-role-policy \
+  --role-name coingecko_snowflake_role \
+  --policy-name snowflake-s3-coingecko-read \
+  --policy-document '{
+    "Version":"2012-10-17",
+    "Statement":[{
+      "Effect":"Allow",
+      "Action":["s3:GetObject","s3:GetObjectVersion","s3:ListBucket"],
+      "Resource":["arn:aws:s3:::coingecko-etl-bucket","arn:aws:s3:::coingecko-etl-bucket/*"]
+    }]
+  }'
+```
+
+> **After creating the role:** Run Step 2 of [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql) to create the storage integration, then run `DESC INTEGRATION S3_COINGECKO_INTEGRATION;` to get the `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID` values. Update this role's trust policy with those values — replace `<SNOWFLAKE_IAM_USER_ARN>` and `<SNOWFLAKE_EXTERNAL_ID>` with the actual values from Snowflake.
+
+> Terraform: [6. IAM — Snowflake S3 Access Role](#6-iam--snowflake-s3-access-role)
 
 &nbsp;
 
-### Important notes
-- AWS S3 does not allow two notifications with overlapping prefixes — these two use completely separate prefixes so they coexist without conflict
-- `lambda-transform-trigger` is created from the **S3 console** and automatically appears in Lambda's trigger list after a few minutes
-- `snowpipe-coingecko-autoload` uses a single SQS ARN shared across all 3 Snowpipes — Snowflake routes internally to the correct pipe based on the file path
-- Amazon EventBridge notifications are enabled on the bucket (toggled On) but not used for Lambda triggering due to corporate SCP restrictions
+> **Notes:**
+> - AWS S3 does not allow two notifications with overlapping prefixes — these two use completely separate prefixes so they coexist without conflict.
+> - `lambda-transform-trigger` is created from the **S3 console** and automatically appears in Lambda's trigger list after a few minutes.
+> - `snowpipe-coingecko-autoload` uses a single SQS ARN shared across all 3 Snowpipes — Snowflake routes internally to the correct pipe based on the file path.
+> - Amazon EventBridge notifications are enabled on the bucket (toggled On) but not used for Lambda triggering due to corporate SCP restrictions.
 
-### Why EventBridge was not used for the transform trigger
-Corporate SCPs (Service Control Policies) blocked `iam:CreateRole` and prevented EventBridge from assuming any role to invoke Lambda. The direct S3 event notification approach bypasses this entirely.
+> **Why not EventBridge for the transform trigger?** Corporate SCPs (Service Control Policies) blocked `iam:CreateRole` and prevented EventBridge from assuming any role to invoke Lambda. The direct S3 event notification approach bypasses this entirely.
 
-> Terraform: [S3 Event Notifications](#terraform-s3-event-notifications)
+> Terraform: [5. S3 Event Notifications](#5-s3-event-notifications)
 
-### Code Changes & Redeployment
+&nbsp;
 
-Every time a Lambda source file is modified, the zip must be recreated and Terraform re-applied. Terraform detects the change automatically via `source_code_hash` — if the zip is identical to the previous version, the Lambda is not redeployed.
+## Step 7: Run the Snowflake Setup Script
 
-**Manual workflow:**
+> **Note:** All Snowflake resources — database, schema, role, storage integration, external stage, file format, tables, and Snowpipes — are provisioned via SQL in **Snowsight** (Snowflake's web UI). These are completely separate from the AWS resources built in the previous steps.
+
+Open [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql) in a Snowsight SQL worksheet and run it top to bottom. The script is organized in 9 sequential steps — each builds on the previous one:
+
+| Step | What it creates | Role used |
+|---|---|---|
+| 1 | Database (`COINGECKO_DB`), schema (`landing`), role (`COINGECKO_DEVELOPER`), grants | `ACCOUNTADMIN` |
+| 2 | Storage integration (`S3_COINGECKO_INTEGRATION`) — establishes trust with AWS | `ACCOUNTADMIN` |
+| 3 | CSV file format (`ff_csv`) and external stage (`coingecko_stage`) | `COINGECKO_DEVELOPER` |
+| 4 | Landing tables — `coin_data`, `market_data`, `price_data` | `COINGECKO_DEVELOPER` |
+| 5 | Snowpipes — one per CSV subfolder, `AUTO_INGEST = TRUE` | `COINGECKO_DEVELOPER` |
+| 6 | `DESC PIPE` to get the SQS ARN for the S3 event notification | `COINGECKO_DEVELOPER` |
+| 7 | Verify pipe status and stage/pipe ownership alignment | `COINGECKO_DEVELOPER` |
+| 8 | Force-load files already in S3 (one-time, before `AUTO_INGEST` takes over) | `COINGECKO_DEVELOPER` |
+| 9 | Verify data loaded — copy history, row counts, sample join query | `COINGECKO_DEVELOPER` |
+
+The script also includes **Pause** and **Resume** sections at the end for cost management.
+
+> **Prerequisites:** Before starting, you need the S3 bucket (`coingecko-etl-bucket`) from Step 1 and the `coingecko_snowflake_role` IAM role from [Step 6.3](#63--create-the-snowflake-s3-access-role-coingecko_snowflake_role) (for the storage integration trust relationship).
+
+> **Circular dependency with Step 6.2:** The SQS ARN for the `snowpipe-coingecko-autoload` S3 event notification comes from Step 6 of this script (`DESC PIPE`). Complete this script through Step 6, then return to [Step 6.2](#62--set-up-snowpipe-coingecko-autoload) to configure the notification.
+
+> **Key rule:** All pipes, tables, and stages must be owned by the same role (`COINGECKO_DEVELOPER`). If you accidentally create objects under `ACCOUNTADMIN`, the script includes ownership transfer commands. See the troubleshooting section on [Snowpipe STALLED_COMPILATION_ERROR](#snowpipe-stalled_compilation_error-role-ownership) for details.
+
+### IAM Roles Reference
+
+| Role | Purpose |
+|---|---|
+| `coingecko_lambda_role` | Shared execution role for both Lambda functions. Needs S3 read/write and CloudWatch Logs. Created in [Step 2](#step-2-iam-role-coingecko_lambda_role). |
+| `coingecko_snowflake_role` | Used by the Snowflake storage integration to access S3. Created in [Step 6.3](#63--create-the-snowflake-s3-access-role-coingecko_snowflake_role). |
+| Developer role | Your login role via Okta SSO (SAML federation). Cannot be assumed by AWS services. |
+
+### Monitoring: CloudWatch Logs
+
+**Lambda** → select function → **Monitor** tab → **View CloudWatch logs**
+
+**Successful transform run log:**
+```
+START RequestId: abc123
+Processing: raw_data/to_process/coingecko_raw_20260401T083125.json
+Written 50 rows to s3://coingecko-etl-bucket/transformed_data/coin_data/coin_data_20260401T083125.csv
+Written 50 rows to s3://coingecko-etl-bucket/transformed_data/market_data/market_data_20260401T083125.csv
+Written 50 rows to s3://coingecko-etl-bucket/transformed_data/price_data/price_data_20260401T083125.csv
+Moved raw_data/to_process/coingecko_raw_20260401T083125.json -> raw_data/processed/coingecko_raw_20260401T083125.json
+END RequestId: abc123
+REPORT Duration: 760ms
+```
+
+&nbsp;
+
+## Deployment Workflow
+
+Once the pipeline is live, you'll need to redeploy when Lambda source code changes. Terraform detects changes automatically via `source_code_hash` — if the zip content is identical to the previously-deployed version, the Lambda function is not re-uploaded.
+
+### Manual workflow
+
 ```bash
 # Re-zip whichever file changed (or both)
 zip coingecko_extract.zip coingeecko_api_data_extract_lambda.py
@@ -430,7 +790,7 @@ zip coingecko_transform.zip coingeecko_api_data_transform_lambda.py
 terraform apply
 ```
 
-**CI/CD workflow (GitLab):**
+### CI/CD workflow (GitLab)
 
 Push your code change and the pipeline handles packaging and deployment automatically. No manual zip or apply needed.
 
@@ -464,69 +824,19 @@ terraform_deploy:
 
 &nbsp;
 
-# Section 3: Snowflake Setup (Snowsight)
+## Terraform Reference
 
-All Snowflake resources — database, schema, role, storage integration, external stage, file format, tables, and Snowpipes — are provisioned via SQL in **Snowsight** (Snowflake's web UI). These are completely separate from the AWS resources in Section 2.
+This section provides a complete, copy-pasteable Terraform configuration that reproduces every AWS resource built through the console guide above. You can use it in two ways: **(a)** hand the entire file to your DevOps team so they can provision the pipeline in a repeatable, auditable manner, or **(b)** run it yourself in a sandbox account where you have admin rights, then point your team at the state file for production promotion.
 
-&nbsp;
+**DevOps handoff workflow:** Because the corporate AWS account restricts direct IAM and infrastructure creation, the recommended workflow is to commit these Terraform files to your team's infra repository, open a merge request tagged `pipeline-infra`, and let DevOps review, plan, and apply. IAM-related blocks (the shared Lambda execution role, the Snowflake S3 access role) are flagged below so reviewers know which resources require elevated privileges. All other resources (S3 bucket, Lambda functions, EventBridge Scheduler, S3 event notifications) can typically be applied by a developer role with scoped permissions.
 
-## Phase 7: Run the Snowflake Setup Script
+> **Order matters:** Apply these resources in the order listed. Later resources reference earlier ones (Lambda functions reference the IAM role; S3 event notifications reference the Lambda functions; the Snowflake access role depends on the S3 bucket). Terraform handles the dependency graph automatically, but if you apply blocks selectively, follow the ordering below.
 
-Open [`snowflake_setup.sql`](./snowflake_setup.sql) in a Snowsight SQL worksheet and run it top to bottom. The script is organized in 9 sequential steps — each builds on the previous one:
+> **Scope:** Terraform covers only AWS infrastructure. Snowflake objects (database, schema, role, storage integration, stage, file format, tables, pipes) are provisioned via SQL in [Step 7: Run the Snowflake Setup Script](#step-7-run-the-snowflake-setup-script) — not Terraform.
 
-| Step | What it creates | Role used |
-|---|---|---|
-| 1 | Database (`COINGECKO_DB`), schema (`landing`), role (`COINGECKO_DEVELOPER`), grants | `ACCOUNTADMIN` |
-| 2 | Storage integration (`S3_COINGECKO_INTEGRATION`) — establishes trust with AWS | `ACCOUNTADMIN` |
-| 3 | CSV file format (`ff_csv`) and external stage (`coingecko_stage`) | `COINGECKO_DEVELOPER` |
-| 4 | Landing tables — `coin_data`, `market_data`, `price_data` | `COINGECKO_DEVELOPER` |
-| 5 | Snowpipes — one per CSV subfolder, `AUTO_INGEST = TRUE` | `COINGECKO_DEVELOPER` |
-| 6 | `DESC PIPE` to get the SQS ARN for the S3 event notification | `COINGECKO_DEVELOPER` |
-| 7 | Verify pipe status and stage/pipe ownership alignment | `COINGECKO_DEVELOPER` |
-| 8 | Force-load files already in S3 (one-time, before `AUTO_INGEST` takes over) | `COINGECKO_DEVELOPER` |
-| 9 | Verify data loaded — copy history, row counts, sample join query | `COINGECKO_DEVELOPER` |
+Before any `resource` blocks, your `.tf` file needs the standard provider preamble. This tells Terraform which cloud provider plugin to download and which region to target:
 
-The script also includes **Pause** and **Resume** sections at the end for cost management.
-
-> **Prerequisites:** Before starting, you need the S3 bucket (`coingecko-etl-bucket`) from Phase 1 and the `coingecko_snowflake_role` IAM role from [Phase 6.3](#63--create-the-snowflake-s3-access-role-coingecko_snowflake_role) (for the storage integration trust relationship).
-
-> **Circular dependency with Phase 6.2:** The SQS ARN for the `snowpipe-coingecko-autoload` S3 event notification comes from Step 6 of this script (`DESC PIPE`). Complete this script through Step 6, then return to [Phase 6.2](#62--set-up-snowpipe-coingecko-autoload) to configure the notification.
-
-> **Key rule:** All pipes, tables, and stages must be owned by the same role (`COINGECKO_DEVELOPER`). If you accidentally create objects under `ACCOUNTADMIN`, the script includes ownership transfer commands. See the troubleshooting section on [Snowpipe STALLED_COMPILATION_ERROR](#snowpipe-stalled_compilation_error-role-ownership) for details.
-
-### IAM Roles Reference
-
-| Role | Purpose |
-|---|---|
-| `coingecko_lambda_role` | Shared execution role for both Lambda functions. Needs S3 read/write and CloudWatch Logs. Created in [Phase 2](#phase-2-iam-role-coingecko_lambda_role). |
-| `coingecko_snowflake_role` | Used by the Snowflake storage integration to access S3. Created in [Phase 6.3](#63--create-the-snowflake-s3-access-role-coingecko_snowflake_role). |
-| Developer role | Your login role via Okta SSO (SAML federation). Cannot be assumed by AWS services. |
-
-### Monitoring: CloudWatch Logs
-
-**Lambda** → select function → **Monitor** tab → **View CloudWatch logs**
-
-**Successful transform run log:**
-```
-START RequestId: abc123
-Processing: raw_data/to_process/coingecko_raw_20260401T083125.json
-Written 50 rows to s3://coingecko-etl-bucket/transformed_data/coin_data/coin_data_20260401T083125.csv
-Written 50 rows to s3://coingecko-etl-bucket/transformed_data/market_data/market_data_20260401T083125.csv
-Written 50 rows to s3://coingecko-etl-bucket/transformed_data/price_data/price_data_20260401T083125.csv
-Moved raw_data/to_process/coingecko_raw_20260401T083125.json -> raw_data/processed/coingecko_raw_20260401T083125.json
-END RequestId: abc123
-REPORT Duration: 760ms
-```
-
-&nbsp;
-
-# Section 4: Terraform Configurations
-
-This section provides Terraform configurations that reproduce the AWS infrastructure from [Section 2](#section-2-step-by-step-aws-console-guide). Each block cross-references the console phase it automates.
-
-> **Scope:** Terraform covers only AWS infrastructure. Snowflake objects (database, schema, role, storage integration, stage, file format, tables, pipes) are provisioned via SQL in [Section 3](#section-3-snowflake-setup-snowsight) — not Terraform.
-
-Before any `resource` blocks, your `.tf` file needs the standard provider preamble:
+### Provider
 
 ```hcl
 terraform {
@@ -546,13 +856,15 @@ provider "aws" {
 
 &nbsp;
 
-## Terraform: S3 Bucket + Prefixes
+### 1. S3 Bucket + Folder Prefixes
 
-Creates the S3 bucket and all folder prefixes used by the pipeline. Corresponds to **Phase 1** in the console guide.
+Creates the S3 bucket and all folder prefixes used by the pipeline.
+
+> **Console equivalent:** [Step 1: S3 Bucket + Folder Structure](#step-1-s3-bucket--folder-structure)
 
 ```hcl
 resource "aws_s3_bucket" "coingecko_pipeline" {
-  bucket = "coingecko-etl-bucket"
+  bucket = "coingecko-etl-bucket"   # Change to your globally-unique bucket name
 }
 
 # Folder placeholders — S3 has no real folders; zero-byte objects establish the prefixes
@@ -565,9 +877,11 @@ resource "aws_s3_object" "transformed_price_data" { bucket = aws_s3_bucket.coing
 
 &nbsp;
 
-## Terraform: IAM Lambda Role
+### 2. IAM — Lambda Execution Role
 
-Creates the shared execution role for both Lambda functions with S3 access and CloudWatch Logs. Corresponds to **Phase 2** in the console guide.
+Shared execution role for both Lambda functions. Attaches the managed `AWSLambdaBasicExecutionRole` policy (CloudWatch Logs) and an inline policy for S3 read/write on the pipeline bucket.
+
+> **Console equivalent:** [Step 2: IAM Role (coingecko_lambda_role)](#step-2-iam-role-coingecko_lambda_role)
 
 ```hcl
 resource "aws_iam_role" "lambda_execution_role" {
@@ -603,8 +917,8 @@ resource "aws_iam_role_policy" "lambda_s3_access" {
         "s3:ListBucket"
       ]
       Resource = [
-        "arn:aws:s3:::coingecko-etl-bucket",
-        "arn:aws:s3:::coingecko-etl-bucket/*"
+        aws_s3_bucket.coingecko_pipeline.arn,
+        "${aws_s3_bucket.coingecko_pipeline.arn}/*"
       ]
     }]
   })
@@ -613,9 +927,11 @@ resource "aws_iam_role_policy" "lambda_s3_access" {
 
 &nbsp;
 
-## Terraform: Lambda Extract + EventBridge
+### 3. Lambda Extract Function + EventBridge Scheduler
 
-Deploys the extract Lambda function and EventBridge Scheduler that triggers it every 5 minutes. Corresponds to **Phase 3 and Phase 4** in the console guide.
+Deploys the extract Lambda function and the EventBridge schedule that invokes it every 5 minutes. Also creates a dedicated scheduler role so EventBridge can assume a principal allowed to call `lambda:InvokeFunction`.
+
+> **Console equivalent:** [Step 3: Lambda Extract Function](#step-3-lambda-extract-function) and [Step 4: EventBridge Scheduler](#step-4-eventbridge-scheduler)
 
 ```hcl
 resource "aws_lambda_function" "coingecko_extract" {
@@ -681,9 +997,11 @@ resource "aws_scheduler_schedule" "coingecko_extract" {
 
 &nbsp;
 
-## Terraform: Lambda Transform
+### 4. Lambda Transform Function
 
-Deploys the transform Lambda function and grants S3 permission to invoke it. Corresponds to **Phase 5** in the console guide.
+Deploys the transform Lambda function and grants S3 permission to invoke it (required before `aws_s3_bucket_notification` can attach).
+
+> **Console equivalent:** [Step 5: Lambda Transform Function](#step-5-lambda-transform-function)
 
 ```hcl
 resource "aws_lambda_function" "coingecko_transform" {
@@ -715,9 +1033,11 @@ resource "aws_lambda_permission" "allow_s3_invoke_transform" {
 
 &nbsp;
 
-## Terraform: S3 Event Notifications
+### 5. S3 Event Notifications
 
-Both notifications must be declared in a **single** `aws_s3_bucket_notification` resource — AWS replaces the entire notification configuration on each apply, so splitting them into two resources would cause one to overwrite the other. Corresponds to **Phase 6** in the console guide.
+Both notifications must be declared in a **single** `aws_s3_bucket_notification` resource — AWS replaces the entire notification configuration on each apply, so splitting them into two resources would cause one to overwrite the other.
+
+> **Console equivalent:** [Step 6: S3 Event Notifications](#step-6-s3-event-notifications)
 
 ```hcl
 resource "aws_s3_bucket_notification" "coingecko_pipeline" {
@@ -745,7 +1065,7 @@ resource "aws_s3_bucket_notification" "coingecko_pipeline" {
 }
 ```
 
-> **Note:** The `snowpipe_sqs_arn` variable value comes from Snowflake — it belongs to Snowflake's AWS account, not yours. Obtain it by running `DESC PIPE COINGECKO_DB.landing.coin_data_pipe;` in Snowflake (Step 6 of [`snowflake_setup.sql`](./snowflake_setup.sql)) and copying the `notification_channel` value. Define the variable in your Terraform configuration:
+> **Note:** The `snowpipe_sqs_arn` variable value comes from Snowflake — it belongs to Snowflake's AWS account, not yours. Obtain it by running `DESC PIPE COINGECKO_DB.landing.coin_data_pipe;` in Snowflake (Step 6 of [`snowflake_setup.sql`](./docs/sql/snowflake_setup.sql)) and copying the `notification_channel` value. Define the variable in your Terraform configuration:
 > ```hcl
 > variable "snowpipe_sqs_arn" {
 >   description = "SQS ARN from Snowflake DESC PIPE output (notification_channel)"
@@ -755,9 +1075,11 @@ resource "aws_s3_bucket_notification" "coingecko_pipeline" {
 
 &nbsp;
 
-## Terraform: IAM Snowflake S3 Role
+### 6. IAM — Snowflake S3 Access Role
 
-Creates the IAM role that Snowflake assumes (via its storage integration) to read from the S3 bucket. Corresponds to **Phase 6.3** in the console guide.
+Creates the IAM role that Snowflake assumes (via its storage integration) to read from the S3 bucket. The trust policy references placeholders for Snowflake's IAM user ARN and external ID — these are known only after you run Step 2 of `snowflake_setup.sql` in Snowsight.
+
+> **Console equivalent:** [Step 6.3 — Create the Snowflake S3 Access Role](#63--create-the-snowflake-s3-access-role-coingecko_snowflake_role)
 
 After applying this Terraform, you must:
 1. Create the storage integration in Snowflake (Step 2 of `snowflake_setup.sql`)
@@ -809,12 +1131,12 @@ resource "aws_iam_role_policy" "snowflake_s3_access" {
           "s3:GetObject",
           "s3:GetObjectVersion"
         ]
-        Resource = "arn:aws:s3:::coingecko-etl-bucket/*"
+        Resource = "${aws_s3_bucket.coingecko_pipeline.arn}/*"
       },
       {
         Effect   = "Allow"
         Action   = "s3:ListBucket"
-        Resource = "arn:aws:s3:::coingecko-etl-bucket"
+        Resource = aws_s3_bucket.coingecko_pipeline.arn
         Condition = {
           StringLike = {
             "s3:prefix" = ["transformed_data/*"]
@@ -828,21 +1150,21 @@ resource "aws_iam_role_policy" "snowflake_s3_access" {
 
 &nbsp;
 
-# Section 5: Troubleshooting
+## Troubleshooting
 
 Common issues you may hit during setup, grouped by component. Start with the group that matches the error you're seeing.
 
 &nbsp;
 
-## Lambda Issues
+### Lambda Issues
 
-### Lambda timeout / memory
+#### Lambda timeout / memory
 
 - **Timeout:** Default is 3 seconds — increase to 60 seconds for both functions. The extract Lambda waits on an external API call; the transform Lambda processes up to 50 rows.
 - **Memory:** 128 MB is sufficient. If processing larger payloads, increase to 256 MB.
 - **Check:** Lambda → function → Configuration → General configuration
 
-### Lambda Access Denied
+#### Lambda Access Denied
 
 1. Verify `coingecko_lambda_role` has `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` on `coingecko-etl-bucket`
 2. Verify `AWSLambdaBasicExecutionRole` is attached (CloudWatch Logs)
@@ -850,9 +1172,9 @@ Common issues you may hit during setup, grouped by component. Start with the gro
 
 &nbsp;
 
-## S3 Event Not Firing
+### S3 Event Not Firing
 
-### `lambda-transform-trigger` not invoking transform Lambda
+#### `lambda-transform-trigger` not invoking transform Lambda
 
 1. Go to **S3 → `coingecko-etl-bucket` → Properties → Event notifications** — verify the notification exists
 2. Check the prefix and suffix match exactly: `raw_data/to_process/` and `.json`
@@ -868,7 +1190,7 @@ Common issues you may hit during setup, grouped by component. Start with the gro
    ```
 5. After saving the notification in S3, the trigger takes a few minutes to appear in the Lambda console (AWS propagation delay)
 
-### `snowpipe-coingecko-autoload` not notifying Snowpipe
+#### `snowpipe-coingecko-autoload` not notifying Snowpipe
 
 1. Verify the SQS ARN matches what `DESC PIPE` returns in Snowflake
 2. Check the prefix and suffix: `transformed_data/` and `.csv`
@@ -876,7 +1198,7 @@ Common issues you may hit during setup, grouped by component. Start with the gro
 
 &nbsp;
 
-## Snowpipe STALLED_COMPILATION_ERROR (Role Ownership)
+### Snowpipe STALLED_COMPILATION_ERROR (Role Ownership)
 
 This is the most common Snowpipe error and is caused by a **role ownership mismatch**.
 
@@ -906,7 +1228,7 @@ SELECT SYSTEM$PIPE_STATUS('COINGECKO_DB.landing.coin_data_pipe');
 
 &nbsp;
 
-## Snowpipe STOPPED_MISSING_TABLE
+### Snowpipe STOPPED_MISSING_TABLE
 
 ```sql
 SELECT SYSTEM$PIPE_STATUS('COINGECKO_DB.landing.coin_data_pipe');
@@ -922,9 +1244,9 @@ SELECT SYSTEM$PIPE_STATUS('COINGECKO_DB.landing.coin_data_pipe');
 
 &nbsp;
 
-## EventBridge Not Triggering
+### EventBridge Not Triggering
 
-### EventBridge schedule not invoking Lambda
+#### EventBridge schedule not invoking Lambda
 
 1. Go to **EventBridge → Scheduler → Schedules** — verify `coingecko-extract-every-5-minutes` exists and is **Enabled**
 2. Check the target Lambda ARN is correct
