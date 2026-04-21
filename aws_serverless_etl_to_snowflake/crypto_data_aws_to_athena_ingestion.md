@@ -1,10 +1,10 @@
-# CoinGecko ETL Pipeline — Full AWS (Glue + Athena)
+# Crypto Data — AWS to Athena Ingestion
 
 **Topic:** Alternative loading layer for the CoinGecko ETL pipeline using AWS Glue Data Catalog and Amazon Athena instead of Snowflake
 
 ![Full-AWS pipeline architecture — EventBridge, Lambda extract/transform, S3 storage, Glue Crawler, Data Catalog, and Athena](docs/diagrams/s3_to_glue_architecture.svg)
 
-> **Companion guide:** This is a continuation of the base pipeline documented in [aws_snowflake_pipeline_setup.md](./aws_snowflake_pipeline_setup.md).
+> **Companion guide:** This is a continuation of the base pipeline documented in [crypto_data_aws_to_snowpipe_ingestion.md](./crypto_data_aws_to_snowpipe_ingestion.md).
 > The first pipeline extracts CoinGecko cryptocurrency data, transforms it via Lambda, and stores it as CSV files in S3.
 > This guide covers the **alternative loading layer** — instead of Snowflake, we use AWS Glue Data Catalog and Amazon Athena.
 
@@ -12,7 +12,7 @@
 
 ## Data Flow
 
-This pipeline picks up where the [primary pipeline](./aws_snowflake_pipeline_setup.md) leaves off — CSVs already exist in S3. It replaces Snowflake + Snowpipe with AWS Glue Data Catalog + Amazon Athena; no data is copied or loaded, Athena reads S3 directly at query time.
+This pipeline picks up where the [primary pipeline](./crypto_data_aws_to_snowpipe_ingestion.md) leaves off — CSVs already exist in S3. It replaces Snowflake + Snowpipe with AWS Glue Data Catalog + Amazon Athena; no data is copied or loaded, Athena reads S3 directly at query time.
 
 ```
 1. PRODUCE    Transform Lambda (from the primary pipeline) runs
@@ -40,7 +40,7 @@ coingecko-etl-bucket/
     └── price_data/                                   ← CSVs → Athena table: coingecko_db.price_data
 ```
 
-> **Note:** This pipeline reads from the bucket already provisioned by the [primary pipeline](./aws_snowflake_pipeline_setup.md#s3-bucket-layout). Only the 3 `transformed_data/` prefixes are queried by Athena — `raw_data/` is not used here.
+> **Note:** This pipeline reads from the bucket already provisioned by the [primary pipeline](./crypto_data_aws_to_snowpipe_ingestion.md#s3-bucket-layout). Only the 3 `transformed_data/` prefixes are queried by Athena — `raw_data/` is not used here.
 
 ---
 
@@ -119,7 +119,7 @@ The Glue Data Catalog tables can be created in two ways. Both result in identica
 
 ## Step 1: Prerequisites
 
-This guide assumes you have already built the base pipeline from the [primary guide](./aws_snowflake_pipeline_setup.md) — the S3 bucket (`coingecko-etl-bucket`) with its folder structure, both Lambda functions (extract + transform), and the EventBridge scheduler are all in place. You should also have at least one successful pipeline run so that CSV files exist in `transformed_data/coin_data/`, `transformed_data/market_data/`, and `transformed_data/price_data/`.
+This guide assumes you have already built the base pipeline from the [primary guide](./crypto_data_aws_to_snowpipe_ingestion.md) — the S3 bucket (`coingecko-etl-bucket`) with its folder structure, both Lambda functions (extract + transform), and the EventBridge scheduler are all in place. You should also have at least one successful pipeline run so that CSV files exist in `transformed_data/coin_data/`, `transformed_data/market_data/`, and `transformed_data/price_data/`.
 
 With that infrastructure ready, this guide adds the Glue Data Catalog and Athena query layer on top.
 
@@ -597,7 +597,7 @@ This section provides a complete, copy-pasteable Terraform configuration that re
 
 > **Order matters:** Apply these resources in the order listed. The crawler references both the Glue database and the IAM role, so those must exist first. Terraform handles the dependency graph automatically, but if you apply blocks selectively, follow the ordering below.
 
-Before any `resource` blocks, your `.tf` file needs the provider preamble and a `data` source for the pre-existing S3 bucket (provisioned by the [primary pipeline](./aws_snowflake_pipeline_setup.md#1-s3-bucket--folder-prefixes)). This module does **not** create the bucket — it only reads from it.
+Before any `resource` blocks, your `.tf` file needs the provider preamble and a `data` source for the pre-existing S3 bucket (provisioned by the [primary pipeline](./crypto_data_aws_to_snowpipe_ingestion.md#1-s3-bucket--folder-prefixes)). This module does **not** create the bucket — it only reads from it.
 
 ### Provider
 

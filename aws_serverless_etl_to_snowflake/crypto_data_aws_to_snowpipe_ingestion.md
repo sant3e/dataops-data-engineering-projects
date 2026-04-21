@@ -1,4 +1,4 @@
-# CoinGecko ETL Pipeline — AWS & Snowflake
+# Crypto Data — AWS to Snowpipe Ingestion
 
 **Topic:** Building an ETL pipeline on AWS that extracts CoinGecko cryptocurrency data, transforms it via Lambda, and loads it into Snowflake via Snowpipe
 

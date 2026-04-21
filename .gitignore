@@ -4,6 +4,7 @@
 .gsd/
 .gsd-id
 .claude/
+.playwright-mcp/
 Thumbs.db
 *.swp
 *.swo

@@ -1,4 +1,4 @@
-# Real-Time AQI Pipeline
+# AQI Data — With Firehose and Flink
 
 **Topic:** Building a real-time data pipeline on AWS for Air Quality Index (AQI) data
 

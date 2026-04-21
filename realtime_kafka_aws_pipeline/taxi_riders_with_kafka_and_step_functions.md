@@ -1,4 +1,4 @@
-# Real-Time AWS Data Pipeline
+# Taxi Riders — With Kafka and Step Functions
 
 **Topic:** Building a real-time data pipeline on AWS for riders data (Uber-like service)
 
