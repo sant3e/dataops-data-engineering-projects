@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" width="1200" height="660" style="background:#1a1b26">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7aa2f7"/>
+    </marker>
+    <style>
+      .node-text { font-family: 'Inter', system-ui, sans-serif; font-weight: 600; text-anchor: middle; }
+      .edge-text { font-family: 'Inter', system-ui, sans-serif; font-size: 11px; fill: #c0caf5; }
+      .footer-text { font-family: 'Inter', system-ui, sans-serif; font-size: 12px; fill: #c0caf5; }
+      .footer-mono { font-family: 'JetBrains Mono', 'Menlo', monospace; font-size: 12px; fill: #c0caf5; }
+      .edge { stroke: #7aa2f7; stroke-width: 2; fill: none; }
+      .edge-skip { stroke: #565f89; stroke-width: 2; stroke-dasharray: 5 4; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="660" fill="#1a1b26"/>
+
+  <!-- ===== Ingestion sensor (top) ===== -->
+  <rect x="50" y="15" width="260" height="55" rx="8" fill="#2a1f3a" stroke="#bb9af7" stroke-width="2"/>
+  <text x="180" y="37" class="node-text" font-size="14" fill="#e0d4ff">Ingestion sensor</text>
+  <text x="180" y="56" class="node-text" font-size="12" fill="#e0d4ff">fires RunRequest for source_a@04-25</text>
+
+  <!-- ===== Vertical arrow from sensor down to source_a, with callout centered ON the arrow ===== -->
+  <!-- Arrow segments skip through the callout area so the arrow looks like it passes behind the callout -->
+  <path d="M 180 70 L 180 105" class="edge"/>
+  <path d="M 180 165 L 180 200" class="edge" marker-end="url(#arrow)"/>
+
+  <!-- daemon-evaluates callout for source_a — CENTERED on the vertical arrow between sensor and source_a -->
+  <rect x="60" y="105" width="240" height="60" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="180" y="123" class="edge-text" text-anchor="middle">daemon evaluates rule for source_a</text>
+  <text x="180" y="139" class="edge-text" text-anchor="middle">source_a is not daemon-managed</text>
+  <text x="180" y="155" class="edge-text" text-anchor="middle">(ingestion sensor drives it) → skip</text>
+
+  <!-- ===== source_a box ===== -->
+  <rect x="80" y="205" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="3"/>
+  <text x="180" y="233" class="node-text" font-size="14" fill="#d6ffdb">source_a</text>
+  <text x="180" y="255" class="node-text" font-size="12" fill="#d6ffdb">@04-25 ✅ just landed</text>
+
+  <!-- ===== source_a → stg_a edge + daemon-evaluates callout above it ===== -->
+  <path d="M 280 240 L 510 240" class="edge" marker-end="url(#arrow)"/>
+  <rect x="285" y="175" width="220" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="395" y="191" class="edge-text" text-anchor="middle">daemon evaluates rule for stg_a</text>
+  <text x="395" y="207" class="edge-text" text-anchor="middle">eager_with_lookback → TRUE</text>
+  <text x="395" y="222" class="edge-text" text-anchor="middle">(upstream newly updated) → submit run</text>
+
+  <!-- ===== stg_a box ===== -->
+  <rect x="510" y="205" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="3"/>
+  <text x="610" y="233" class="node-text" font-size="14" fill="#d6ffdb">stg_a</text>
+  <text x="610" y="255" class="node-text" font-size="12" fill="#d6ffdb">@04-25 ✅ materialized</text>
+
+  <!-- ===== stg_a → mart_c edge (skip) + daemon-evaluates callout ===== -->
+  <path d="M 710 245 L 980 330" class="edge-skip" marker-end="url(#arrow)"/>
+  <rect x="735" y="265" width="220" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="845" y="281" class="edge-text" text-anchor="middle">daemon evaluates rule for mart_c</text>
+  <text x="845" y="297" class="edge-text" text-anchor="middle">any_deps_missing → TRUE</text>
+  <text x="845" y="312" class="edge-text" text-anchor="middle">(stg_b@04-25 missing) → skip</text>
+
+  <!-- ===== source_b box (bottom row) ===== -->
+  <rect x="80" y="400" width="200" height="70" rx="8" fill="#24283b" stroke="#565f89" stroke-width="2"/>
+  <text x="180" y="428" class="node-text" font-size="14" fill="#a9b1d6">source_b</text>
+  <text x="180" y="450" class="node-text" font-size="12" fill="#a9b1d6">@04-24 (no new ingestion)</text>
+
+  <!-- ===== source_b → stg_b edge (skip) + single daemon-evaluates callout above it ===== -->
+  <path d="M 280 435 L 510 435" class="edge-skip" marker-end="url(#arrow)"/>
+  <rect x="285" y="370" width="220" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="395" y="386" class="edge-text" text-anchor="middle">daemon evaluates rule for stg_b</text>
+  <text x="395" y="402" class="edge-text" text-anchor="middle">source_b@04-25 missing</text>
+  <text x="395" y="417" class="edge-text" text-anchor="middle">any_deps_missing → skip</text>
+
+  <!-- ===== stg_b box ===== -->
+  <rect x="510" y="400" width="200" height="70" rx="8" fill="#24283b" stroke="#565f89" stroke-width="2"/>
+  <text x="610" y="428" class="node-text" font-size="14" fill="#a9b1d6">stg_b</text>
+  <text x="610" y="450" class="node-text" font-size="12" fill="#a9b1d6">@04-24</text>
+
+  <!-- Daemon callout for source_b — below source_b -->
+  <rect x="60" y="485" width="240" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="180" y="501" class="edge-text" text-anchor="middle">daemon evaluates rule for source_b</text>
+  <text x="180" y="517" class="edge-text" text-anchor="middle">source_b is not daemon-managed</text>
+  <text x="180" y="532" class="edge-text" text-anchor="middle">(no new ingestion this tick) → skip</text>
+
+  <!-- ===== stg_b → mart_c edge (skip) + daemon-evaluates callout ON the edge ===== -->
+  <path d="M 710 435 L 980 375" class="edge-skip" marker-end="url(#arrow)"/>
+  <rect x="735" y="370" width="220" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="845" y="386" class="edge-text" text-anchor="middle">daemon evaluates rule for mart_c</text>
+  <text x="845" y="402" class="edge-text" text-anchor="middle">any_deps_missing → TRUE</text>
+  <text x="845" y="417" class="edge-text" text-anchor="middle">(via stg_b@04-25 path) → skip</text>
+
+  <!-- ===== mart_c box (right, centered vertically) ===== -->
+  <rect x="980" y="305" width="200" height="70" rx="8" fill="#3a2f1a" stroke="#e0af68" stroke-width="2"/>
+  <text x="1080" y="333" class="node-text" font-size="14" fill="#ffe5b0">mart_c</text>
+  <text x="1080" y="355" class="node-text" font-size="12" fill="#ffe5b0">@04-24 ⏳ blocked</text>
+
+  <!-- ===== Footer (full-width, very bottom) ===== -->
+  <rect x="30" y="545" width="1140" height="105" rx="6" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="50" y="570" class="footer-text" font-weight="600">On every tick the daemon evaluates the full rule for every asset it manages:</text>
+  <text x="70" y="592" class="footer-mono">    (code_version_change)  OR  (eager_with_lookback)</text>
+  <text x="50" y="616" class="footer-text">Both clauses are evaluated — it is a boolean OR. The rule fires if either branch is true. For stg_a@04-25 on this tick:</text>
+  <text x="70" y="635" class="footer-text">    • code_version_change → FALSE (no one edited stg_a's SQL)    • eager_with_lookback → TRUE → FALSE OR TRUE → submit run</text>
+</svg>

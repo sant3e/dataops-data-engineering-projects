@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" style="background:#1a1b26">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7aa2f7"/>
+    </marker>
+    <style>
+      .name { font-family: 'Inter', system-ui, sans-serif; font-weight: 600; text-anchor: middle; }
+      .tag-text { font-family: 'Inter', system-ui, sans-serif; font-size: 10px; font-weight: 600; text-anchor: middle; }
+      .edge-text { font-family: 'Inter', system-ui, sans-serif; font-size: 11px; fill: #c0caf5; }
+      .footer-text { font-family: 'Inter', system-ui, sans-serif; font-size: 12px; fill: #c0caf5; }
+      .edge { stroke: #7aa2f7; stroke-width: 2; fill: none; }
+      .edge-skip { stroke: #565f89; stroke-width: 2; stroke-dasharray: 5 4; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="320" fill="#1a1b26"/>
+
+  <!-- source_a: tag N/A + @04-24 -->
+  <rect x="80" y="40" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="80" y="40" width="200" height="22" rx="8" fill="#16171e"/>
+  <rect x="80" y="56" width="200" height="6" fill="#16171e"/>
+  <text x="180" y="56" class="tag-text" fill="#7a8195">tag: N/A</text>
+  <line x1="80" y1="62" x2="280" y2="62" stroke="#9ece6a" stroke-width="1"/>
+  <text x="180" y="82" class="name" font-size="14" fill="#d6ffdb">source_a</text>
+  <text x="180" y="100" class="name" font-size="12" fill="#d6ffdb">@04-24</text>
+
+  <!-- stg_a: tag N/A + @04-24 -->
+  <rect x="510" y="40" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="510" y="40" width="200" height="22" rx="8" fill="#16171e"/>
+  <rect x="510" y="56" width="200" height="6" fill="#16171e"/>
+  <text x="610" y="56" class="tag-text" fill="#7a8195">tag: N/A</text>
+  <line x1="510" y1="62" x2="710" y2="62" stroke="#9ece6a" stroke-width="1"/>
+  <text x="610" y="82" class="name" font-size="14" fill="#d6ffdb">stg_a</text>
+  <text x="610" y="100" class="name" font-size="12" fill="#d6ffdb">@04-24</text>
+
+  <!-- source_b: tag N/A + @03-30 -->
+  <rect x="80" y="210" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="80" y="210" width="200" height="22" rx="8" fill="#16171e"/>
+  <rect x="80" y="226" width="200" height="6" fill="#16171e"/>
+  <text x="180" y="226" class="tag-text" fill="#7a8195">tag: N/A</text>
+  <line x1="80" y1="232" x2="280" y2="232" stroke="#9ece6a" stroke-width="1"/>
+  <text x="180" y="252" class="name" font-size="14" fill="#d6ffdb">source_b</text>
+  <text x="180" y="270" class="name" font-size="12" fill="#d6ffdb">@03-30 (monthly)</text>
+
+  <!-- stg_b: tag latest_available_source + @03-30 -->
+  <rect x="510" y="210" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="510" y="210" width="200" height="22" rx="8" fill="#2a1f3a"/>
+  <rect x="510" y="226" width="200" height="6" fill="#2a1f3a"/>
+  <text x="610" y="226" class="tag-text" fill="#e0d4ff">tag: latest_available_source</text>
+  <line x1="510" y1="232" x2="710" y2="232" stroke="#9ece6a" stroke-width="1"/>
+  <text x="610" y="252" class="name" font-size="14" fill="#d6ffdb">stg_b</text>
+  <text x="610" y="270" class="name" font-size="12" fill="#d6ffdb">@03-30</text>
+
+  <!-- mart_c: tag latest_available + @04-24 -->
+  <rect x="940" y="125" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="940" y="125" width="200" height="22" rx="8" fill="#2a1f3a"/>
+  <rect x="940" y="141" width="200" height="6" fill="#2a1f3a"/>
+  <text x="1040" y="141" class="tag-text" fill="#e0d4ff">tag: latest_available</text>
+  <line x1="940" y1="147" x2="1140" y2="147" stroke="#9ece6a" stroke-width="1"/>
+  <text x="1040" y="167" class="name" font-size="14" fill="#d6ffdb">mart_c</text>
+  <text x="1040" y="185" class="name" font-size="12" fill="#d6ffdb">@04-24</text>
+
+  <!-- Edges -->
+  <path d="M 280 75 L 510 75" class="edge" marker-end="url(#arrow)"/>
+  <path d="M 280 245 L 510 245" class="edge" marker-end="url(#arrow)"/>
+  <path d="M 710 80 L 940 155" class="edge" marker-end="url(#arrow)"/>
+  <path d="M 710 240 L 940 165" class="edge" marker-end="url(#arrow)"/>
+
+  <!-- Footer note -->
+  <rect x="30" y="290" width="1140" height="22" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="50" y="306" class="footer-text">mart_c@04-24 was built by the cross-partition sensor, joining stg_a@04-24 with stg_b@03-30 (the most-recent stg_b partition ≤ 04-24).</text>
+</svg>

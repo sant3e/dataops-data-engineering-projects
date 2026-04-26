@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" style="background:#1a1b26">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7aa2f7"/>
+    </marker>
+    <style>
+      .name { font-family: 'Inter', system-ui, sans-serif; font-weight: 600; text-anchor: middle; }
+      .tag-text { font-family: 'Inter', system-ui, sans-serif; font-size: 10px; font-weight: 600; text-anchor: middle; }
+      .edge-text { font-family: 'Inter', system-ui, sans-serif; font-size: 11px; fill: #c0caf5; }
+      .footer-text { font-family: 'Inter', system-ui, sans-serif; font-size: 12px; fill: #c0caf5; }
+      .footer-mono { font-family: 'JetBrains Mono', 'Menlo', monospace; font-size: 12px; fill: #c0caf5; }
+      .edge { stroke: #7aa2f7; stroke-width: 2; fill: none; }
+      .edge-skip { stroke: #565f89; stroke-width: 2; stroke-dasharray: 5 4; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="#1a1b26"/>
+
+  <!-- source_a (stale, no new ingestion today) -->
+  <rect x="55" y="90" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="55" y="90" width="200" height="22" rx="8" fill="#16171e"/>
+  <rect x="55" y="106" width="200" height="6" fill="#16171e"/>
+  <text x="155" y="106" class="tag-text" fill="#7a8195">tag: N/A</text>
+  <line x1="55" y1="112" x2="255" y2="112" stroke="#9ece6a" stroke-width="1"/>
+  <text x="155" y="132" class="name" font-size="14" fill="#d6ffdb">source_a</text>
+  <text x="155" y="150" class="name" font-size="12" fill="#d6ffdb">@04-29 (last daily)</text>
+
+  <!-- daemon callout source_a -->
+  <rect x="35" y="20" width="240" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="155" y="36" class="edge-text" text-anchor="middle">daemon evaluates rule for source_a</text>
+  <text x="155" y="52" class="edge-text" text-anchor="middle">source_a is not daemon-managed</text>
+  <text x="155" y="67" class="edge-text" text-anchor="middle">(no new ingestion this tick) → skip</text>
+
+  <!-- source_a -> stg_a edge skipped -->
+  <path d="M 255 125 L 510 125" class="edge-skip" marker-end="url(#arrow)"/>
+  <rect x="285" y="80" width="220" height="40" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="395" y="98" class="edge-text" text-anchor="middle">daemon evaluates rule for stg_a</text>
+  <text x="395" y="112" class="edge-text" text-anchor="middle">no upstream newly updated → skip</text>
+
+  <!-- stg_a -->
+  <rect x="510" y="90" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="2"/>
+  <rect x="510" y="90" width="200" height="22" rx="8" fill="#16171e"/>
+  <rect x="510" y="106" width="200" height="6" fill="#16171e"/>
+  <text x="610" y="106" class="tag-text" fill="#7a8195">tag: N/A</text>
+  <line x1="510" y1="112" x2="710" y2="112" stroke="#9ece6a" stroke-width="1"/>
+  <text x="610" y="132" class="name" font-size="14" fill="#d6ffdb">stg_a</text>
+  <text x="610" y="150" class="name" font-size="12" fill="#d6ffdb">@04-29</text>
+
+  <!-- stg_a -> mart_c DAEMON SKIPS (grey now) -->
+  <path d="M 710 135 L 980 305" class="edge-skip" marker-end="url(#arrow)"/>
+  <rect x="735" y="200" width="220" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="845" y="216" class="edge-text" text-anchor="middle">daemon SKIPS mart_c entirely</text>
+  <text x="845" y="232" class="edge-text" text-anchor="middle">automation_condition = None</text>
+  <text x="845" y="247" class="edge-text" text-anchor="middle">(tag: latest_available)</text>
+
+  <!-- source_b box (just landed - monthly) -->
+  <rect x="55" y="410" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="3"/>
+  <rect x="55" y="410" width="200" height="22" rx="8" fill="#16171e"/>
+  <rect x="55" y="426" width="200" height="6" fill="#16171e"/>
+  <text x="155" y="426" class="tag-text" fill="#7a8195">tag: N/A</text>
+  <line x1="55" y1="432" x2="255" y2="432" stroke="#9ece6a" stroke-width="1"/>
+  <text x="155" y="452" class="name" font-size="14" fill="#d6ffdb">source_b</text>
+  <text x="155" y="470" class="name" font-size="12" fill="#d6ffdb">@04-30 ✅ just landed</text>
+
+  <!-- source_b -> stg_b FIRES -->
+  <path d="M 255 445 L 510 445" class="edge" marker-end="url(#arrow)"/>
+  <rect x="268" y="395" width="234" height="40" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="385" y="413" class="edge-text" text-anchor="middle">daemon evaluates rule for stg_b</text>
+  <text x="385" y="427" class="edge-text" text-anchor="middle">eager_with_lookback → TRUE → submit run</text>
+
+  <!-- stg_b (just materialized) -->
+  <rect x="510" y="410" width="200" height="70" rx="8" fill="#1f3a2a" stroke="#9ece6a" stroke-width="3"/>
+  <rect x="510" y="410" width="200" height="22" rx="8" fill="#2a1f3a"/>
+  <rect x="510" y="426" width="200" height="6" fill="#2a1f3a"/>
+  <text x="610" y="426" class="tag-text" fill="#e0d4ff">tag: latest_available_source</text>
+  <line x1="510" y1="432" x2="710" y2="432" stroke="#9ece6a" stroke-width="1"/>
+  <text x="610" y="452" class="name" font-size="14" fill="#d6ffdb">stg_b</text>
+  <text x="610" y="470" class="name" font-size="12" fill="#d6ffdb">@04-30 ✅ materialized</text>
+
+  <!-- stg_b -> mart_c DAEMON SKIPS (grey) -->
+  <path d="M 710 445 L 980 340" class="edge-skip" marker-end="url(#arrow)"/>
+  <rect x="735" y="365" width="220" height="52" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="845" y="381" class="edge-text" text-anchor="middle">daemon SKIPS mart_c entirely</text>
+  <text x="845" y="397" class="edge-text" text-anchor="middle">automation_condition = None</text>
+  <text x="845" y="412" class="edge-text" text-anchor="middle">(sensor will react on next tick)</text>
+
+  <!-- mart_c (still reflects previous partition) -->
+  <rect x="980" y="280" width="200" height="70" rx="8" fill="#24283b" stroke="#565f89" stroke-width="2"/>
+  <rect x="980" y="280" width="200" height="22" rx="8" fill="#2a1f3a"/>
+  <rect x="980" y="296" width="200" height="6" fill="#2a1f3a"/>
+  <text x="1080" y="296" class="tag-text" fill="#e0d4ff">tag: latest_available</text>
+  <line x1="980" y1="302" x2="1180" y2="302" stroke="#565f89" stroke-width="1"/>
+  <text x="1080" y="322" class="name" font-size="14" fill="#a9b1d6">mart_c</text>
+  <text x="1080" y="340" class="name" font-size="12" fill="#a9b1d6">@04-29 ⏳ waiting for sensor</text>
+
+  <!-- vertical arrow from ingestion UP to source_b -->
+  <path d="M 155 600 L 155 565" class="edge"/>
+  <path d="M 155 505 L 155 490" class="edge" marker-end="url(#arrow)"/>
+
+  <!-- callout source_b daemon (on arrow) -->
+  <rect x="35" y="505" width="240" height="60" rx="4" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="155" y="523" class="edge-text" text-anchor="middle">daemon evaluates rule for source_b</text>
+  <text x="155" y="539" class="edge-text" text-anchor="middle">source_b is not daemon-managed</text>
+  <text x="155" y="555" class="edge-text" text-anchor="middle">(ingestion sensor drives it) → skip</text>
+
+  <!-- Ingestion sensor -->
+  <rect x="25" y="605" width="260" height="55" rx="8" fill="#2a1f3a" stroke="#bb9af7" stroke-width="2"/>
+  <text x="155" y="627" class="name" font-size="14" fill="#e0d4ff">Ingestion sensor</text>
+  <text x="155" y="646" class="name" font-size="12" fill="#e0d4ff">fires RunRequest for source_b@04-30</text>
+
+  <!-- Footer -->
+  <rect x="30" y="675" width="1140" height="40" rx="6" fill="#16171e" stroke="#3d59a1" stroke-width="1"/>
+  <text x="50" y="695" class="footer-text" font-weight="600">Monthly source_b landed. Daemon fires stg_b@04-30 normally. mart_c still has rule=None, so daemon skips.</text>
+  <text x="50" y="712" class="footer-text">Previous mart_c partitions (04-25..04-29, joined with stg_b@03-30) are NOT rebuilt. Next sensor tick will materialize mart_c@04-30 only.</text>
+</svg>
