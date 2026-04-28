@@ -1,0 +1,297 @@
+{
+  "Comment": "YouTube Data Pipeline — end-to-end orchestration. Ingest (API) → Silver transforms in parallel → DQ gate → Gold aggregation → Gold catalog refresh → Notify.",
+  "StartAt": "IngestFromYouTubeAPI",
+  "States": {
+    "IngestFromYouTubeAPI": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:yt-data-pipeline-youtube-ingestion-dev",
+        "Payload": {
+          "triggered_by": "step_functions",
+          "execution_id.$": "$$.Execution.Id"
+        }
+      },
+      "ResultPath": "$.ingestion_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyIngestionFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "WaitForS3Consistency"
+    },
+    "WaitForS3Consistency": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Comment": "Brief wait for S3 eventual consistency on newly written objects.",
+      "Next": "ProcessInParallel"
+    },
+    "ProcessInParallel": {
+      "Type": "Parallel",
+      "Comment": "Run reference-data transform (Lambda) and statistics ETL (Glue) in parallel.",
+      "Branches": [
+        {
+          "StartAt": "TransformReferenceData",
+          "States": {
+            "TransformReferenceData": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:yt-data-pipeline-json-to-parquet-dev",
+                "Payload": {
+                  "triggered_by": "step_functions"
+                }
+              },
+              "ResultPath": "$.reference_result",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 15,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "RunBronzeToSilverGlueJob",
+          "States": {
+            "RunBronzeToSilverGlueJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "yt-data-pipeline-bronze-to-silver-dev",
+                "Arguments": {
+                  "--bronze_database": "yt_pipeline_bronze_dev",
+                  "--bronze_table": "raw_statistics",
+                  "--silver_bucket": "yt-data-pipeline-silver-<ACCOUNT_ID>-dev",
+                  "--silver_database": "yt_pipeline_silver_dev",
+                  "--silver_table": "clean_statistics"
+                }
+              },
+              "ResultPath": "$.glue_bronze_silver_result",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 60,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallel_results",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyTransformFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "RunDataQualityChecks"
+    },
+    "RunDataQualityChecks": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:yt-data-pipeline-data-quality-dev",
+        "Payload": {
+          "layer": "silver",
+          "database": "yt_pipeline_silver_dev",
+          "tables": ["clean_statistics", "clean_reference_data"]
+        }
+      },
+      "ResultPath": "$.dq_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "EvaluateDataQuality"
+    },
+    "EvaluateDataQuality": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.dq_result.Payload.quality_passed",
+          "BooleanEquals": true,
+          "Next": "RunSilverToGoldGlueJob"
+        }
+      ],
+      "Default": "NotifyDQFailure"
+    },
+    "RunSilverToGoldGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "yt-data-pipeline-silver-to-gold-dev",
+        "Arguments": {
+          "--silver_database": "yt_pipeline_silver_dev",
+          "--gold_bucket": "yt-data-pipeline-gold-<ACCOUNT_ID>-dev"
+        }
+      },
+      "ResultPath": "$.glue_gold_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyGoldFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CatalogGoldTables"
+    },
+    "CatalogGoldTables": {
+      "Comment": "Refresh the Gold Glue Catalog after the ETL job writes new Parquet. The Silver-to-Gold job no longer registers tables itself (overwrite semantics required dropping getSink's auto-catalog), so this crawler is the authoritative catalog refresh step.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name": "yt-data-pipeline-gold-crawler-dev"
+      },
+      "ResultPath": "$.gold_crawler_start",
+      "Retry": [
+        {
+          "ErrorEquals": ["Glue.CrawlerRunningException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 4,
+          "BackoffRate": 2
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyCatalogFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "WaitForCrawlerToFinish"
+    },
+    "WaitForCrawlerToFinish": {
+      "Comment": "The aws-sdk:glue:startCrawler integration returns as soon as the crawler enters RUNNING; it is not .sync-capable. Poll GetCrawler until state=READY before declaring success.",
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "CheckCrawlerState"
+    },
+    "CheckCrawlerState": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": {
+        "Name": "yt-data-pipeline-gold-crawler-dev"
+      },
+      "ResultPath": "$.gold_crawler_status",
+      "Next": "IsCrawlerDone"
+    },
+    "IsCrawlerDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.gold_crawler_status.Crawler.State",
+          "StringEquals": "READY",
+          "Next": "NotifySuccess"
+        },
+        {
+          "Variable": "$.gold_crawler_status.Crawler.State",
+          "StringEquals": "STOPPING",
+          "Next": "WaitForCrawlerToFinish"
+        },
+        {
+          "Variable": "$.gold_crawler_status.Crawler.State",
+          "StringEquals": "RUNNING",
+          "Next": "WaitForCrawlerToFinish"
+        }
+      ],
+      "Default": "NotifyCatalogFailure"
+    },
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:<REGION>:<ACCOUNT_ID>:yt-data-pipeline-alerts-dev",
+        "Subject": "[YT Pipeline] Pipeline completed successfully",
+        "Message.$": "States.Format('Pipeline run {} completed. All layers updated and Gold catalog refreshed.', $$.Execution.Id)"
+      },
+      "End": true
+    },
+    "NotifyIngestionFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:<REGION>:<ACCOUNT_ID>:yt-data-pipeline-alerts-dev",
+        "Subject": "[YT Pipeline] FAILURE — Ingestion step failed",
+        "Message.$": "States.JsonToString($.error)"
+      },
+      "End": true
+    },
+    "NotifyTransformFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:<REGION>:<ACCOUNT_ID>:yt-data-pipeline-alerts-dev",
+        "Subject": "[YT Pipeline] FAILURE — Transform step failed",
+        "Message.$": "States.JsonToString($.error)"
+      },
+      "End": true
+    },
+    "NotifyDQFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:<REGION>:<ACCOUNT_ID>:yt-data-pipeline-alerts-dev",
+        "Subject": "[YT Pipeline] WARNING — Data quality checks failed",
+        "Message.$": "States.JsonToString($.dq_result)"
+      },
+      "End": true
+    },
+    "NotifyGoldFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:<REGION>:<ACCOUNT_ID>:yt-data-pipeline-alerts-dev",
+        "Subject": "[YT Pipeline] FAILURE — Gold aggregation failed",
+        "Message.$": "States.JsonToString($.error)"
+      },
+      "End": true
+    },
+    "NotifyCatalogFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:<REGION>:<ACCOUNT_ID>:yt-data-pipeline-alerts-dev",
+        "Subject": "[YT Pipeline] WARNING — Gold catalog refresh failed",
+        "Message.$": "States.Format('Gold Parquet was written successfully, but the Gold crawler failed. Athena queries against Gold tables may see stale schema until you re-run the crawler manually. Error: {}', States.JsonToString($.error))"
+      },
+      "End": true
+    }
+  }
+}
