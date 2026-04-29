@@ -5,9 +5,9 @@ Hands-on data engineering projects covering batch and real-time pipelines on AWS
 ## Projects
 
 ### [AWS Serverless ETL to Snowflake](aws_serverless_etl_to_snowflake/)
-Batch ETL pipeline that ingests cryptocurrency market data from the **CoinGecko API** every 5 minutes, transforms it with AWS Lambda, and loads it into Snowflake via Snowpipe.
+Batch ETL pipeline that ingests cryptocurrency market data from the **CoinGecko API** every 5 minutes and transforms it with AWS Lambda. Two loading variants are documented: Snowpipe auto-ingest into Snowflake landing tables, and an AWS-only path that catalogs the transformed CSVs in Glue and queries them with Athena.
 
-**Stack:** Python · Terraform · S3 · Lambda · EventBridge · SQS · Snowpipe · Snowflake
+**Stack:** Python · Terraform · S3 · Lambda · EventBridge · Glue · Athena · SQS · Snowpipe · Snowflake
 
 ### [Realtime Kinesis AWS Pipeline](realtime_kinesis_aws_pipeline/)
 Real-time streaming pipeline that processes Air Quality Index data through two parallel workflows — raw archival via Firehose and analytical processing via Apache Flink.
@@ -23,9 +23,3 @@ End-to-end real-time pipeline that ingests NYC taxi ride data via Kafka, deliver
 Serverless medallion-architecture pipeline (Bronze/Silver/Gold) that ingests YouTube Trending data from Kaggle CSVs and the YouTube Data API, transforms it with Glue PySpark ETL, validates with a data-quality Lambda gate, and exposes aggregate analytics via Athena. Orchestrated by Step Functions with EventBridge Scheduler for a daily cron-based trigger.
 
 **Stack:** Python · Terraform · S3 · Lambda · Glue (Crawlers + PySpark ETL + DynamicFrames) · Athena · Step Functions · EventBridge Scheduler · SNS · Secrets Manager
-
-## Reference Material
-
-### [Dagster Chapter](dagster_chapter/)
-Deep-dive write-up on why Dagster's asset-first model is a better fit than DAG-centric orchestrators (Airflow ≤ 3.1) for partitioned data warehouses — covering partition tracking, cross-asset sync, multi-cadence upstream/downstream, and SQL-change-triggered reruns. Not an AWS pipeline; kept in this repo as orchestration-choice context for the projects above.
-
