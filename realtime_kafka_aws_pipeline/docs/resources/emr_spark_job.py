@@ -39,10 +39,24 @@ from pyspark.sql.functions import col, sum as _sum, avg, count, to_date, monoton
 spark = SparkSession.builder.appName("TaxiETL").getOrCreate()
 
 # --- I/O Paths ---
-# UPDATE THESE for your environment:
-input_path = "s3://ridestreamlakehouse-td/Refined/run-*"                   # Refined CSV from Glue job
-dim_output = "s3://ridestreamlakehouse-td/Business/processed/dimensions/"   # Dimension tables output
-fact_output = "s3://ridestreamlakehouse-td/Business/processed/facts/"       # Fact table output
+# The pipeline S3 bucket is passed as a Spark job argument — no hardcoded
+# bucket name in the script. Submit the job with:
+#
+#   aws emr-serverless start-job-run \
+#     --application-id <APP_ID> --execution-role-arn <ROLE> \
+#     --job-driver '{"sparkSubmit":{"entryPoint":"s3://<BUCKET>/scripts/emr_spark_job.py",
+#                                    "entryPointArguments":["--bucket","<BUCKET>"]}}'
+#
+# Or from a Step Functions state machine, pass it via
+# JobDriver.SparkSubmit.EntryPointArguments as ["--bucket","<BUCKET>"].
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--bucket", required=True, help="Pipeline S3 bucket name (no scheme)")
+args, _ = parser.parse_known_args()
+
+input_path  = f"s3://{args.bucket}/Refined/"                         # Refined CSV from Glue job
+dim_output  = f"s3://{args.bucket}/Business/processed/dimensions/"   # Dimension tables output
+fact_output = f"s3://{args.bucket}/Business/processed/facts/"        # Fact table output
 
 # --- Read Refined Data ---
 # Reads all CSV files matching the glob pattern. header=True uses the first row as column names.

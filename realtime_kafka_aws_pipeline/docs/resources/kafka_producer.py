@@ -44,11 +44,39 @@ import random
 # datetime/timedelta: generates realistic timestamps for pickup/dropoff
 from datetime import datetime, timedelta
 
+# os: read environment variables so values don't have to be hardcoded
+import os
+
 # --- Configuration ---
-# UPDATE THESE for your environment:
-topicname = 'realtimeridedata'
-BROKERS = 'boot-azgxfx6o.c1.kafka-serverless.us-east-1.amazonaws.com:9098'  # Replace with your bootstrap server
-region = 'us-east-1'  # Replace with your region (e.g. 'eu-north-1')
+# Values below are read from environment variables so the script can be
+# committed to git and reused across regions/accounts without editing code.
+# Set them in your shell (or via ~/.bashrc) before running:
+#
+#   export MSK_TOPIC="realtimeridedata"
+#   export MSK_BOOTSTRAP="boot-xxxx.c2.kafka-serverless.eu-north-1.amazonaws.com:9098"
+#   export AWS_REGION="eu-north-1"
+#
+# How to find each value:
+#   - MSK_BOOTSTRAP: MSK Console → your cluster → View client information → Bootstrap servers
+#                   (SASL/IAM endpoint on port 9098) — or via CLI:
+#                     aws kafka get-bootstrap-brokers --cluster-arn <ARN> \
+#                       --query 'BootstrapBrokerStringSaslIam' --output text
+#   - AWS_REGION:   the region where your MSK cluster lives (e.g. eu-north-1, us-east-1)
+#   - MSK_TOPIC:    the Kafka topic this producer writes to (default: realtimeridedata)
+#
+# If an env var is not set, the script falls back to a placeholder value and
+# will fail fast at startup — intentional, to catch missing config before data
+# starts flowing.
+
+topicname = os.environ.get('MSK_TOPIC', 'realtimeridedata')
+BROKERS   = os.environ.get('MSK_BOOTSTRAP', '<REPLACE_WITH_MSK_BOOTSTRAP_SERVER>')
+region    = os.environ.get('AWS_REGION', '<REPLACE_WITH_AWS_REGION>')
+
+if BROKERS.startswith('<REPLACE_') or region.startswith('<REPLACE_'):
+    raise SystemExit(
+        "MSK_BOOTSTRAP and AWS_REGION env vars must be set. See the header comment "
+        "in this file for how to find them."
+    )
 
 
 # --- IAM Authentication ---

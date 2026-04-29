@@ -114,7 +114,7 @@ Here's what each service does in the pipeline, in the order data touches it.
 
 **Amazon Athena** — Athena is the serverless SQL engine over the Glue Catalog. You write SQL, Athena scans the Parquet files in S3 directly, and you pay per TB scanned (~$5/TB). No servers to provision, no data to load — just point at the catalog and query. Athena serves two roles here: the ad-hoc query interface for exploring the star schema, and the target database that dbt reads from and writes to.
 
-**dbt (data build tool)** — dbt is the transformation layer on top of Athena. Its source tables are the star schema in `athena-db` (created by EMR and registered by the Crawler). dbt reads these via `{{ source() }}` references and builds analytical models — joins between fact and dimension tables, revenue aggregations, top-N route rankings — writing the results to `athena-dbt-db`. dbt handles dependency ordering, tests (`not_null`, `unique`, custom SQL tests), documentation, and incremental builds. Unlike EMR, dbt doesn't extract or load data; it only transforms data already in the warehouse (the "T" in ELT).
+**dbt (data build tool)** — dbt is the transformation layer on top of Athena. Its source tables are the star schema in `athena-db` (created by EMR and registered by the Crawler). dbt reads these via `{{ source() }}` references and builds analytical models — joins between fact and dimension tables, revenue aggregations, top-N route rankings — writing the results to `athena_dbt_db`. dbt handles dependency ordering, tests (`not_null`, `unique`, custom SQL tests), documentation, and incremental builds. Unlike EMR, dbt doesn't extract or load data; it only transforms data already in the warehouse (the "T" in ELT).
 
 > **Note on dbt in production:** The tutorial runs dbt on an EC2 instance, which is fine for learning. In production dbt typically runs through CI/CD or dbt Cloud — no persistent infrastructure to manage. See Step 13 for alternatives.
 
@@ -146,7 +146,20 @@ Think of it as a phonebook — you call one number to get the directory of every
 
 ## Step 1: Create the MSK Cluster
 
-### Create the Cluster
+> **⚠️ Region check before you start — Firehose + MSK Serverless regional limitation:**
+> The pipeline's Step 7 uses Firehose `MSKAsSource` with `Connectivity: PRIVATE`. This requires the MSK cluster to support multi-VPC private connectivity. For **MSK Serverless**, that feature is regionally gated — notably **not available in `eu-north-1` today**. Verify your region up front:
+>
+> ```bash
+> # Read-only probe: if this returns "BadRequestException: This Region doesn't currently support VPC connectivity with Amazon MSK Serverless clusters", use MSK Provisioned instead.
+> aws kafka create-vpc-connection --target-cluster-arn <ANY_EXISTING_SERVERLESS_ARN> \
+>   --authentication SASL_IAM --vpc-id <any-vpc> \
+>   --client-subnets <subnet-a> --security-groups <sg> \
+>   --region <YOUR_REGION> 2>&1 | head -2
+> ```
+>
+> If the probe errors out with the "Region doesn't support" message, follow the **MSK Provisioned** path below instead of Serverless. Otherwise continue with Serverless (cheaper to run, auto-scales, 2-5 min to provision).
+
+### Option A: MSK Serverless (preferred when region supports it)
 
 1. **AWS Console** → search **MSK** → **Amazon MSK** → **Create cluster**
 2. **Creation method:** Custom create
@@ -175,12 +188,51 @@ aws kafka list-clusters-v2 \
   --query 'ClusterInfoList[0].{Name:ClusterName,State:State,Arn:ClusterArn}'
 ```
 
+### Option B: MSK Provisioned (required when Serverless multi-VPC is unavailable in your region)
+
+Provisioned MSK supports multi-VPC private connectivity in every region where MSK is available. Use 3 AZs (multi-VPC requires 3-broker minimum) and `kafka.m5.large` or larger (`t3.small` doesn't support multi-VPC).
+
+```bash
+# 1. Create the provisioned cluster
+cat > cluster-config.json <<EOF
+{
+  "ClusterName": "MSK",
+  "KafkaVersion": "3.9.x",
+  "NumberOfBrokerNodes": 3,
+  "BrokerNodeGroupInfo": {
+    "InstanceType": "kafka.m5.large",
+    "ClientSubnets": ["<SUBNET_A>","<SUBNET_B>","<SUBNET_C>"],
+    "SecurityGroups": ["<SG_ID>"],
+    "StorageInfo": {"EbsStorageInfo": {"VolumeSize": 100}}
+  },
+  "ClientAuthentication": {
+    "Sasl": {"Iam": {"Enabled": true}}
+  },
+  "EncryptionInfo": {
+    "EncryptionInTransit": {"ClientBroker": "TLS", "InCluster": true}
+  }
+}
+EOF
+aws kafka create-cluster --cli-input-json file://cluster-config.json --region <YOUR_REGION>
+
+# 2. Wait for ACTIVE (15-30 min). Then enable multi-VPC private connectivity:
+VER=$(aws kafka describe-cluster-v2 --cluster-arn <MSK_ARN> --region <YOUR_REGION> \
+  --query 'ClusterInfo.CurrentVersion' --output text)
+aws kafka update-connectivity --cluster-arn <MSK_ARN> --current-version "$VER" --region <YOUR_REGION> \
+  --connectivity-info '{"VpcConnectivity":{"ClientAuthentication":{"Sasl":{"Iam":{"Enabled":true}}}}}'
+# update-connectivity takes 15-60 min to roll across brokers. Cluster is ACTIVE when done.
+```
+
+> **⚠️ Cost:** Provisioned MSK with 3× `kafka.m5.large` is roughly **$0.87/hr running** plus storage. For a learning walkthrough, only keep the cluster running while you're actively using it — the teardown script handles deletion.
+
 ### Get the Bootstrap Server Endpoint
 
 Once the cluster is **Active**:
 
 1. Click on the cluster name → **View client information**
-2. Copy the **Bootstrap servers** endpoint (e.g. `boot-xxxxx.c2.kafka-serverless.<region>.amazonaws.com:9098`)
+2. Copy the **Bootstrap servers** endpoint
+   - Serverless: `boot-xxxxx.c2.kafka-serverless.<region>.amazonaws.com:9098`
+   - Provisioned: `b-1.msk.<id>.c2.kafka.<region>.amazonaws.com:9098,b-2.*,b-3.*`
 3. **Save this** — you'll need it for every Kafka CLI command on the EC2 instance
 
 Or via CLI:
@@ -227,10 +279,11 @@ You'll need to create VPC resources via Terraform (see [1. VPC + Networking](#1-
    - **VPC:** Same VPC as the MSK cluster
    - **Auto-assign public IP:** Enable
    - **Firewall:** Select **Create security group**
-   - **SSH** from Anywhere (`0.0.0.0/0`) is pre-selected ✅
-   - Click **Add security group rule** → select **HTTP**, source **Anywhere**
-7. **Storage:** 8 GiB (default)
-8. Click **Launch instance**
+   - **SSH**: change source from `0.0.0.0/0` to **My IP** (Console auto-fills your current public IP)
+   - Do NOT add an HTTP/80 rule — nothing on the Kafka client serves HTTP
+7. **Advanced details → Metadata version:** `V2 only (token required)` (enforces IMDSv2)
+8. **Storage:** 30 GiB — Amazon Linux 2023 requires a minimum of 30 GB (the snapshot is ~20 GB); anything smaller is rejected at launch.
+9. Click **Launch instance**
 
 Or via CLI:
 ```bash
@@ -240,7 +293,11 @@ aws ec2 create-key-pair \
   --query 'KeyMaterial' --output text > kafka_access.pem
 chmod 400 kafka_access.pem
 
-# 2. Launch the EC2 instance (replace placeholders with your values)
+# 2. Find your current public IP for the SSH rule
+MY_IP=$(curl -s https://checkip.amazonaws.com)/32
+
+# 3. Launch the EC2 instance (replace placeholders with your values)
+#    --metadata-options enforces IMDSv2 (token required); prevents SSRF-based credential theft.
 aws ec2 run-instances \
   --image-id <AMAZON_LINUX_AMI_ID> \
   --instance-type t3.micro \
@@ -248,14 +305,17 @@ aws ec2 run-instances \
   --subnet-id <SUBNET_ID> \
   --security-group-ids <DEFAULT_SG_ID> \
   --associate-public-ip-address \
-  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=8}' \
+  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=30}' \
+  --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=Kafka-Client}]' \
   --region <YOUR_REGION>
 ```
 
 > **Note on key pair:** In a corporate environment where you lack `ec2:CreateKeyPair` permissions, this must be provisioned via Terraform. See [2. EC2 Key Pair](#2-ec2-key-pair) in the Terraform — All Resources section.
 
-> **Note:** `0.0.0.0/0` means open to the world — fine for learning, not for production.
+> **Why restrict SSH to your IP and skip HTTP?** `0.0.0.0/0` on port 22 invites constant scanning and brute-force attempts against the `.pem` key material. Restricting to your current public IP closes that surface. The Kafka client has no web server, so port 80 serves no purpose — leaving it open is a gratuitous attack surface. This tutorial uses EC2 Instance Connect (browser-based SSH) via AWS APIs, so you don't even need port 22 from the public internet for this walkthrough; the **My IP** scope is belt-and-suspenders for when you want to SSH directly using the `.pem`.
+
+> **Zero-ingress alternative — SSM Session Manager:** Attach the `AmazonSSMManagedInstanceCore` managed policy to the EC2 instance role (see Step 4) to reach the instance with `aws ssm start-session --target <INSTANCE_ID>` — no SSH port, no public IP needed. Ideal for production.
 
 ### Connect to the Instance
 
@@ -297,29 +357,35 @@ aws ec2 modify-instance-attribute \
 Once connected to the EC2 instance via Instance Connect, run these commands:
 
 ```bash
-# 1. Install Java (Kafka requires JVM to run)
-sudo yum -y install java-11
+# 1. Install Java 17 + wget (Kafka 3.x requires Java 11+; Java 17 is the current LTS
+#    and is what MSK Serverless runs internally — matching versions avoids
+#    subtle class-loading issues when using the IAM auth JAR. Amazon Linux 2023
+#    does NOT ship wget by default.)
+sudo yum -y install java-17-amazon-corretto wget
 
 # 2. Install Python pip (needed for Python Kafka libraries later)
 sudo yum -y install python-pip
 
-# 3. Download Kafka CLI tools (2.8.1 — compatible with MSK Serverless)
-wget https://archive.apache.org/dist/kafka/2.8.1/kafka_2.12-2.8.1.tgz
+# 3. Download Kafka CLI tools (3.9.0 — current stable, compatible with MSK Serverless).
+#    NOTE: Older versions (2.8.x) still technically work with MSK Serverless today,
+#    but Apache Kafka 4.0 (2025) removed several old client API versions and AWS
+#    will eventually follow. Use a recent 3.x to stay safe.
+wget https://archive.apache.org/dist/kafka/3.9.0/kafka_2.13-3.9.0.tgz
 
 # 4. Extract and make scripts executable
-tar -xzf kafka_2.12-2.8.1.tgz
-chmod +x kafka_2.12-2.8.1/bin/*.sh
+tar -xzf kafka_2.13-3.9.0.tgz
+chmod +x kafka_2.13-3.9.0/bin/*.sh
 
 # 5. Download AWS MSK IAM authentication plugin
 # MSK Serverless ONLY supports IAM auth — without this JAR, Kafka CLI
 # tools cannot authenticate to the cluster.
-cd kafka_2.12-2.8.1/libs/
+cd kafka_2.13-3.9.0/libs/
 wget https://github.com/aws/aws-msk-iam-auth/releases/download/v2.3.0/aws-msk-iam-auth-2.3.0-all.jar
 cd ~
 
 # 6. Create client.properties (IAM auth config for Kafka CLI)
 # Every Kafka CLI command will reference this file via --command-config flag.
-cat > kafka_2.12-2.8.1/bin/client.properties << 'EOF'
+cat > kafka_2.13-3.9.0/bin/client.properties << 'EOF'
 security.protocol=SASL_SSL
 sasl.mechanism=AWS_MSK_IAM
 sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;
@@ -328,15 +394,18 @@ EOF
 
 # 7. Set CLASSPATH — tells Java where to find the IAM auth JAR
 # Export for current session AND persist in .bashrc for reconnects.
-export CLASSPATH=/home/ec2-user/kafka_2.12-2.8.1/libs/aws-msk-iam-auth-2.3.0-all.jar
-echo 'export CLASSPATH=/home/ec2-user/kafka_2.12-2.8.1/libs/aws-msk-iam-auth-2.3.0-all.jar' >> ~/.bashrc
+export CLASSPATH=/home/ec2-user/kafka_2.13-3.9.0/libs/aws-msk-iam-auth-2.3.0-all.jar
+echo 'export CLASSPATH=/home/ec2-user/kafka_2.13-3.9.0/libs/aws-msk-iam-auth-2.3.0-all.jar' >> ~/.bashrc
 
 # 8. Install Python Kafka packages
 # kafka-python: for writing producers/consumers in Python (used later for ride event producer)
 # aws-msk-iam-sasl-signer-python: generates IAM auth tokens for kafka-python
-pip install kafka-python
+# Pin a known-good kafka-python version (2.0.5+) to avoid API drift.
+pip install 'kafka-python>=2.0.5'
 pip install aws-msk-iam-sasl-signer-python
 ```
+
+> **Alternative Python client:** For production-realistic code, consider `confluent-kafka` (librdkafka-based) instead of `kafka-python`. It has better performance and tighter Apache Kafka version tracking. Stick with `kafka-python` here — the tutorial producer script uses it.
 
 
 ---
@@ -449,7 +518,7 @@ A wrapper around an IAM role that allows EC2 instances to assume it. When you at
 ### Navigate to the Kafka bin directory
 
 ```bash
-cd ~/kafka_2.12-2.8.1/bin/
+cd ~/kafka_2.13-3.9.0/bin/
 ```
 
 ### Create a test topic
@@ -459,7 +528,7 @@ Replace `<BOOTSTRAP_SERVER>` with your endpoint from Step 1:
 ```bash
 ./kafka-topics.sh --create \
   --topic first_topic \
-  --command-config /home/ec2-user/kafka_2.12-2.8.1/bin/client.properties \
+  --command-config /home/ec2-user/kafka_2.13-3.9.0/bin/client.properties \
   --partitions 1 \
   --bootstrap-server <BOOTSTRAP_SERVER>
 ```
@@ -477,7 +546,7 @@ Created topic first_topic.
 ```bash
 ./kafka-console-producer.sh \
   --topic first_topic \
-  --producer.config /home/ec2-user/kafka_2.12-2.8.1/bin/client.properties \
+  --producer.config /home/ec2-user/kafka_2.13-3.9.0/bin/client.properties \
   --bootstrap-server <BOOTSTRAP_SERVER>
 ```
 
@@ -488,7 +557,7 @@ This opens an interactive prompt (`>`). Type messages one per line, then `Ctrl+C
 ```bash
 ./kafka-console-consumer.sh \
   --topic first_topic \
-  --consumer.config /home/ec2-user/kafka_2.12-2.8.1/bin/client.properties \
+  --consumer.config /home/ec2-user/kafka_2.13-3.9.0/bin/client.properties \
   --from-beginning \
   --bootstrap-server <BOOTSTRAP_SERVER>
 ```
@@ -502,7 +571,7 @@ This reads all messages from the topic from the beginning. `Ctrl+C` to exit.
 | Error | Cause | Fix |
 |---|---|---|
 | `TimeoutException: Timed out waiting for a node assignment` | EC2 can't reach MSK — security group mismatch | Add the MSK security group to the EC2 instance (see Step 2) |
-| `CLASSPATH is not set` / IAM auth errors | CLASSPATH not exported | Run `export CLASSPATH=/home/ec2-user/kafka_2.12-2.8.1/libs/aws-msk-iam-auth-2.3.0-all.jar` |
+| `CLASSPATH is not set` / IAM auth errors | CLASSPATH not exported | Run `export CLASSPATH=/home/ec2-user/kafka_2.13-3.9.0/libs/aws-msk-iam-auth-2.3.0-all.jar` |
 | `AccessDeniedException` on Kafka operations | IAM role not attached or policy missing | Verify the `Kafka_Cluster_Access` role is attached to the EC2 instance |
 
 ---
@@ -516,11 +585,11 @@ This reads all messages from the topic from the beginning. `Ctrl+C` to exit.
 The script publishes to a topic called `realtimeridedata`. Create it first:
 
 ```bash
-cd ~/kafka_2.12-2.8.1/bin/
+cd ~/kafka_2.13-3.9.0/bin/
 
 ./kafka-topics.sh --create \
   --topic realtimeridedata \
-  --command-config /home/ec2-user/kafka_2.12-2.8.1/bin/client.properties \
+  --command-config /home/ec2-user/kafka_2.13-3.9.0/bin/client.properties \
   --partitions 1 \
   --bootstrap-server <BOOTSTRAP_SERVER>
 ```
@@ -534,15 +603,22 @@ cd ~
 vi producer.py
 ```
 
-Paste the contents of [`docs/resources/kafka_producer.py`](docs/resources/kafka_producer.py) into the editor. **Before saving**, update `topicname`, `BROKERS`, and `region` at the top of the script with your values (topic name, MSK bootstrap endpoint, and AWS region).
+Paste the contents of [`docs/resources/kafka_producer.py`](docs/resources/kafka_producer.py) into the editor — **no code edits required**. The script reads its config from environment variables (`MSK_BOOTSTRAP`, `AWS_REGION`, `MSK_TOPIC`), so the same file works across regions/accounts without modification.
 
 Save and exit vi (`:wq`).
 
 #### 3. Run the producer
 
+Set the config env vars once (values come from Step 1's bootstrap endpoint) and run:
+
 ```bash
+export MSK_BOOTSTRAP="boot-xxxxx.c2.kafka.<YOUR_REGION>.amazonaws.com:9098"  # from MSK View client information
+export AWS_REGION="<YOUR_REGION>"
+export MSK_TOPIC="realtimeridedata"
 python3 producer.py
 ```
+
+If you want the env vars to persist across shells, append the three `export` lines to `~/.bashrc`.
 
 Expected output:
 ```
@@ -558,11 +634,11 @@ Finished! Successfully sent 100 out of 100 records.
 Open a **second Instance Connect tab** to the same EC2 instance and run:
 
 ```bash
-cd ~/kafka_2.12-2.8.1/bin/
+cd ~/kafka_2.13-3.9.0/bin/
 
 ./kafka-console-consumer.sh \
   --topic realtimeridedata \
-  --consumer.config /home/ec2-user/kafka_2.12-2.8.1/bin/client.properties \
+  --consumer.config /home/ec2-user/kafka_2.13-3.9.0/bin/client.properties \
   --from-beginning \
   --bootstrap-server <BOOTSTRAP_SERVER>
 ```
@@ -588,11 +664,25 @@ Instead of manually typing messages into the Kafka console producer, we run a Py
 1. **AWS Console** → **S3** → **Create bucket**
 2. **Bucket name:** Choose a unique name (e.g. `ridestreamlakehouse-td`)
 3. **Region:** Same as your MSK cluster
-4. Leave all other settings as default → **Create bucket**
+4. Verify **Block all public access** is **ON** (default — do not disable)
+5. **Default encryption:** AES256 (SSE-S3) — enabled by default for accounts created after Jan 2023; verify it is on
+6. **Create bucket**
 
 Or via CLI:
 ```bash
+# Create the bucket. Note: outside us-east-1 you must pass LocationConstraint
+# if you use `s3api create-bucket` instead of the shorthand `s3 mb`.
 aws s3 mb s3://<YOUR_BUCKET> --region <YOUR_REGION>
+
+# Enforce Block Public Access (belt-and-suspenders — new buckets already have this
+# on by default, but explicit is better).
+aws s3api put-public-access-block \
+  --bucket <YOUR_BUCKET> \
+  --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+# Verify default encryption is on (SSE-S3 / AES256)
+aws s3api get-bucket-encryption --bucket <YOUR_BUCKET>
 ```
 
 #### 2. Create folders for the pipeline layers
@@ -611,14 +701,72 @@ aws s3api put-object --bucket <YOUR_BUCKET> --key Business/
 
 #### 3. Update MSK cluster policy for Firehose access
 
-Before Firehose can read from MSK, the cluster must explicitly allow it:
+Before Firehose can read from MSK, the cluster must explicitly allow it via a **resource-based policy** (attached to the cluster itself). The policy needs TWO statements working together:
+
+- **`Service: firehose.amazonaws.com`** granted `kafka:CreateVpcConnection` — lets the Firehose service provision its managed PrivateLink endpoint into the cluster's VPC.
+- **`AWS: <FIREHOSE_ROLE_ARN>`** granted the data-plane `kafka-cluster:*` actions on the cluster + topic + group ARNs — lets the Firehose role authenticate via SASL/IAM and consume records. (The data-plane actions are **not** accepted under the `Service` principal in an MSK cluster policy; they must use the IAM role ARN as the `AWS` principal.)
 
 1. **AWS Console** → **Amazon MSK** → Click your cluster
 2. Go to the **Properties** tab
 3. Click **Edit cluster policy**
-4. Select **Basic**
-5. Check **Include Kafka** and **Include Firehose**
+4. Choose **Advanced** (the "Basic" template only covers the `Service` side — it leaves the role-side data-plane actions off, which is why Firehose silently fails to consume)
+5. Paste the following JSON, substituting `<MSK_CLUSTER_ARN>`, `<MSK_UUID>` (the UUID suffix of the cluster ARN), and `<FIREHOSE_ROLE_ARN>`
 6. **Save changes**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FirehoseServiceCreateVpcConnection",
+      "Effect": "Allow",
+      "Principal": { "Service": "firehose.amazonaws.com" },
+      "Action": "kafka:CreateVpcConnection",
+      "Resource": "<MSK_CLUSTER_ARN>"
+    },
+    {
+      "Sid": "FirehoseRoleClusterAccess",
+      "Effect": "Allow",
+      "Principal": { "AWS": "<FIREHOSE_ROLE_ARN>" },
+      "Action": [
+        "kafka:GetBootstrapBrokers",
+        "kafka:DescribeCluster",
+        "kafka:DescribeClusterV2",
+        "kafka-cluster:Connect"
+      ],
+      "Resource": "<MSK_CLUSTER_ARN>"
+    },
+    {
+      "Sid": "FirehoseRoleTopicAccess",
+      "Effect": "Allow",
+      "Principal": { "AWS": "<FIREHOSE_ROLE_ARN>" },
+      "Action": [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:DescribeTopicDynamicConfiguration",
+        "kafka-cluster:ReadData"
+      ],
+      "Resource": "arn:aws:kafka:<YOUR_REGION>:<ACCOUNT_ID>:topic/MSK/<MSK_UUID>/*"
+    },
+    {
+      "Sid": "FirehoseRoleGroupAccess",
+      "Effect": "Allow",
+      "Principal": { "AWS": "<FIREHOSE_ROLE_ARN>" },
+      "Action": "kafka-cluster:DescribeGroup",
+      "Resource": "arn:aws:kafka:<YOUR_REGION>:<ACCOUNT_ID>:group/MSK/<MSK_UUID>/*"
+    }
+  ]
+}
+```
+
+> **⚠️ If you're on MSK Serverless:** you also need multi-VPC private connectivity enabled on the cluster. On **Provisioned** clusters this is toggled via `aws kafka update-connectivity --connectivity-info '{"VpcConnectivity":{"ClientAuthentication":{"Sasl":{"Iam":{"Enabled":true}}}}}'` **after** cluster creation. On MSK Serverless, multi-VPC is supposed to be inherent, but **in some regions (notably `eu-north-1`) the `CreateVpcConnection` API returns `"This Region doesn't currently support VPC connectivity with Amazon MSK Serverless clusters"`** — in which case Firehose's internal `CreateVpcConnection` call silently no-ops and the stream sits ACTIVE with zero reads. Verify with `aws kafka create-vpc-connection --target-cluster-arn <arn> --authentication SASL_IAM --vpc-id <id> --client-subnets <subnets> --security-groups <sgs>` (read-only probe — expect `BadRequestException` if the feature is unavailable). If your region isn't on the supported list, switch to **MSK Provisioned** (Step 1 has the CLI for it) or a supported region.
+
+Or via CLI (save the JSON above as `msk-cluster-policy.json` first):
+```bash
+aws kafka put-cluster-policy \
+  --cluster-arn <MSK_CLUSTER_ARN> \
+  --policy file://msk-cluster-policy.json \
+  --region <YOUR_REGION>
+```
 
 #### 4. Create the Firehose stream
 
@@ -633,8 +781,47 @@ Before Firehose can read from MSK, the cluster must explicitly allow it:
 9. Click **Create Firehose stream**
 10. Wait for status to change to **Active**
 
-Or via CLI (requires the MSK cluster policy to allow Firehose first — save the source and destination configs as JSON files):
+Or via CLI (requires the MSK cluster policy to allow Firehose first).
+
+Firehose needs two config files. Create them locally — substitute `<MSK_CLUSTER_ARN>`, `<FIREHOSE_ROLE_ARN>`, `<YOUR_BUCKET>`, and `<YOUR_REGION>` with your values:
+
+`msk-source-config.json`:
+```json
+{
+  "MSKClusterARN": "<MSK_CLUSTER_ARN>",
+  "TopicName": "realtimeridedata",
+  "AuthenticationConfiguration": {
+    "RoleARN": "<FIREHOSE_ROLE_ARN>",
+    "Connectivity": "PRIVATE"
+  }
+}
+```
+
+`s3-destination-config.json`:
+```json
+{
+  "RoleARN": "<FIREHOSE_ROLE_ARN>",
+  "BucketARN": "arn:aws:s3:::<YOUR_BUCKET>",
+  "BufferingHints": { "SizeInMBs": 5, "IntervalInSeconds": 300 },
+  "CompressionFormat": "UNCOMPRESSED",
+  "CloudWatchLoggingOptions": {
+    "Enabled": true,
+    "LogGroupName": "/aws/kinesisfirehose/MSK_Batch",
+    "LogStreamName": "DestinationDelivery"
+  }
+}
+```
+
+Then create the stream:
 ```bash
+# (Optional, one-time) Pre-create the log group with a bounded retention.
+# Without this, Firehose's auto-created log group defaults to "Never Expire".
+aws logs create-log-group --log-group-name /aws/kinesisfirehose/MSK_Batch --region <YOUR_REGION>
+aws logs put-retention-policy \
+  --log-group-name /aws/kinesisfirehose/MSK_Batch \
+  --retention-in-days 14 \
+  --region <YOUR_REGION>
+
 aws firehose create-delivery-stream \
   --delivery-stream-name MSK_Batch \
   --delivery-stream-type MSKAsSource \
@@ -653,15 +840,125 @@ aws firehose describe-delivery-stream \
 
 #### 5. Attach additional permissions to the Firehose role
 
-The auto-created Firehose role has a scoped-down policy, but it needs broader MSK and S3 access to work reliably:
+The auto-created Firehose role has a scoped-down policy but needs **a specific set of MSK, EC2, and S3 permissions** for the PRIVATE connectivity path to work. In addition, the role's **trust policy** must NOT restrict the assume-role call with `aws:SourceAccount` — that condition blocks Firehose's internal `CreateVpcConnection` attempt and produces the misleading error `AWS Firehose is not authorized to perform kafka:CreateVpcConnection on resource <role-arn>`.
 
-1. **AWS Console** → **IAM** → **Roles**
-2. Search for the Firehose role (named `KinesisFirehoseServiceRole-MSK_Batch-<region>-<id>`)
-3. Click **Add permissions** → **Attach policies**
-4. Search and select:
-   - `AmazonMSKFullAccess`
-   - `AmazonS3FullAccess`
-5. Click **Attach policies**
+**Step 5a — fix the trust policy** (remove any SourceAccount/SourceArn conditions):
+
+1. **AWS Console** → **IAM** → **Roles** → the Firehose role
+2. **Trust relationships** tab → **Edit trust policy**
+3. Replace with:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "firehose.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+4. **Update policy**
+
+> **Why no `aws:SourceAccount` condition here?** Firehose's managed code path that calls `CreateVpcConnection` internally does so outside the normal delivery-stream context, and the `aws:SourceAccount` condition isn't always populated at that layer. Leaving the condition in place causes a silent assume-role denial that is reported (misleadingly) as `kafka:CreateVpcConnection on resource <role-arn>`. Removing the condition fixes this.
+
+**Step 5b — attach the scoped inline policy**:
+
+1. **AWS Console** → **IAM** → **Roles** → the Firehose role (named `KinesisFirehoseServiceRole-MSK_Batch-<region>-<id>`)
+2. Click **Add permissions** → **Create inline policy**
+3. Switch to **JSON** tab, paste (substitute `<MSK_CLUSTER_ARN>`, `<MSK_UUID>`, `<YOUR_BUCKET>`, `<YOUR_REGION>`, `<ACCOUNT_ID>`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MSKControlPlane",
+      "Effect": "Allow",
+      "Action": [
+        "kafka:CreateVpcConnection",
+        "kafka:DeleteVpcConnection",
+        "kafka:DescribeVpcConnection",
+        "kafka:DescribeCluster",
+        "kafka:DescribeClusterV2",
+        "kafka:GetBootstrapBrokers"
+      ],
+      "Resource": [
+        "<MSK_CLUSTER_ARN>",
+        "arn:aws:kafka:<YOUR_REGION>:<ACCOUNT_ID>:vpc-connection/*"
+      ]
+    },
+    {
+      "Sid": "MSKDataPlane",
+      "Effect": "Allow",
+      "Action": [
+        "kafka-cluster:Connect",
+        "kafka-cluster:DescribeCluster",
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:DescribeTopicDynamicConfiguration",
+        "kafka-cluster:ReadData",
+        "kafka-cluster:DescribeGroup",
+        "kafka-cluster:AlterGroup"
+      ],
+      "Resource": [
+        "<MSK_CLUSTER_ARN>",
+        "arn:aws:kafka:<YOUR_REGION>:<ACCOUNT_ID>:topic/MSK/<MSK_UUID>/*",
+        "arn:aws:kafka:<YOUR_REGION>:<ACCOUNT_ID>:group/MSK/<MSK_UUID>/*"
+      ]
+    },
+    {
+      "Sid": "EC2PrivateLink",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:CreateVpcEndpoint",
+        "ec2:DescribeVpcEndpoints",
+        "ec2:DeleteVpcEndpoints",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeRouteTables"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Write",
+      "Effect": "Allow",
+      "Action": [
+        "s3:AbortMultipartUpload",
+        "s3:GetBucketLocation",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<YOUR_BUCKET>",
+        "arn:aws:s3:::<YOUR_BUCKET>/*"
+      ]
+    },
+    {
+      "Sid": "CWLogs",
+      "Effect": "Allow",
+      "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
+      "Resource": "arn:aws:logs:<YOUR_REGION>:<ACCOUNT_ID>:log-group:/aws/kinesisfirehose/MSK_Batch:*"
+    }
+  ]
+}
+```
+
+4. **Name:** `FirehosePipelineAccess`
+5. **Create policy**
+
+> **Why `ec2:CreateTags`/`ec2:*VpcEndpoint`/`ec2:*NetworkInterface` on the Firehose role?** Firehose provisions its PrivateLink connection by creating a VPC interface endpoint in your VPC, which triggers ENI creation in the cluster's subnets. Without `ec2:CreateTags` specifically, that provisioning fails silently and the Firehose stream either stalls in `CREATING` or becomes `ACTIVE` but never reads data. The AWS docs for multi-VPC private connectivity clients list these actions as required; they apply identically to Firehose as a MSK client.
+>
+> **Why scoped rather than `AmazonS3FullAccess` + `AmazonMSKFullAccess`?** The managed policies grant `s3:*` and `kafka-cluster:*` on **every** resource in the account. The scoped inline policy lists only the bucket, cluster, and VPC resources this pipeline uses — same functionality, far smaller blast radius.
 
 #### 6. Run the producer to generate data for Firehose
 
@@ -701,16 +998,44 @@ Whichever threshold is hit first triggers the write.
 
 ### IAM Role for Glue ETL
 
-Glue needs an IAM role to read/write S3 and access the Glue service:
+Glue needs an IAM role to read/write the pipeline S3 bucket and access the Glue service. Avoid `*FullAccess` managed policies — the managed `AWSGlueServiceRole` is required (it is narrowly scoped) but S3 access should be limited to your specific bucket via an inline policy.
 
 1. **AWS Console** → **IAM** → **Roles** → **Create role**
 2. **Trusted entity:** AWS Service → **Glue**
-3. **Attach policies:**
-   - `AmazonS3FullAccess`
-   - `AWSGlueConsoleFullAccess`
-   - `AWSGlueServiceRole`
+3. **Attach managed policy:**
+   - `AWSGlueServiceRole` (required — grants Glue control-plane access)
 4. **Role name:** `Glue_S3_msk_access`
 5. **Create role**
+6. Open the new role → **Add permissions** → **Create inline policy** → **JSON** tab, paste (substitute `<YOUR_BUCKET>`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<YOUR_BUCKET>",
+        "arn:aws:s3:::<YOUR_BUCKET>/*",
+        "arn:aws:s3:::aws-glue-assets-*",
+        "arn:aws:s3:::aws-glue-assets-*/*"
+      ]
+    }
+  ]
+}
+```
+
+7. **Name:** `GluePipelineBucketAccess` → **Create policy**
+
+> **Why not `AmazonS3FullAccess`?** Managed full-access policies grant `s3:*` on every bucket in the account. The scoped inline policy above limits access to your pipeline bucket plus the Glue asset bucket (which Glue auto-creates to store its generated PySpark scripts). A Glue job using this role cannot accidentally read or clobber unrelated buckets.
+
+> **Why is `AWSGlueConsoleFullAccess` NOT in the list?** That policy is only needed when a user (or role) needs to use the **Glue Console UI** to edit jobs — it includes Console-specific helper permissions. The Glue **job execution** only needs `AWSGlueServiceRole`.
 
 ### Build the Visual ETL Job
 
@@ -777,11 +1102,24 @@ Click **+** on the SQL Query node → **Target** → **Amazon S3**
    - **Glue version:** 5.0 (or latest available — do NOT use 0.9/1.0 which are End of Life)
    - **Worker type:** G.1X
    - **Number of workers:** 2
+   - **Job bookmark:** **Enable** (critical — see note below)
 3. Click **Save**
 4. Click **Run**
 5. Go to the **Runs** tab to monitor — wait for status **Succeeded**
 
 > **⚠️ Glue Version:** AWS Glue versions 0.9 and 1.0 reached End of Life on March 31, 2026. Jobs on these versions can no longer run. Always use Glue 5.0 (or the latest available). If creating via the Console Visual ETL, verify the version in Job details before saving — the Console may default to an older version.
+
+> **⚠️ Enable Job Bookmarks:** Without bookmarks, every re-run of this job re-reads **all** raw files and re-writes the entire `Refined/` folder. Because the EventBridge rule in Step 12 fires on every new object in `Refined/`, this creates an infinite loop of EMR job runs. With bookmarks enabled, Glue tracks which input files it has already processed and only reads new ones.
+
+> **Bound CloudWatch log retention:** Glue auto-creates `/aws-glue/jobs/output` and `/aws-glue/jobs/error` log groups with **Never Expire** retention the first time any Glue job runs in this account — a silent cost accrual. Set retention once per account:
+>
+> ```bash
+> for lg in /aws-glue/jobs/output /aws-glue/jobs/error; do
+>   aws logs put-retention-policy \
+>     --log-group-name "$lg" --retention-in-days 14 \
+>     --region <YOUR_REGION>
+> done
+> ```
 
 ### Output
 
@@ -867,8 +1205,13 @@ aws s3 cp emr_spark_job.py s3://<your-bucket>/scripts/emr_spark_job.py
    - Select your bucket (e.g. `ridestreamlakehouse-td`)
    - Click **Create role**
 4. **Script location:** Browse to `s3://<your-bucket>/scripts/emr_spark_job.py`
-5. Click **Submit**
-6. Watch status: **Scheduled** → **Running** → **Success** (~2 minutes)
+5. Expand **Additional settings** → **Monitoring and logs** — enable S3 logs:
+   - **S3 URI:** `s3://<your-bucket>/emr-logs/`
+   - This captures driver/executor stdout/stderr after the job ends. Without it, a failed job has no recoverable logs.
+6. Click **Submit**
+7. Watch status: **Scheduled** → **Running** → **Success** (~2 minutes)
+
+> **Why S3 logs matter:** When the Step Function in Step 11 kicks off this job and it fails, the Step Function turns red and EMR shows `FAILED` — but without S3 logs configured, the Spark driver stack trace is unreachable. Enabling S3 logs once (either here or via the JobRun `MonitoringConfiguration`) makes failures debuggable.
 
 #### 5. Verify output in S3
 
@@ -924,11 +1267,29 @@ Create a dedicated role for the crawler (separate from the Glue ETL role for pro
 
 1. **AWS Console** → **IAM** → **Roles** → **Create role**
 2. **Trusted entity:** AWS Service → **Glue**
-3. **Attach policies:**
-   - `AWSGlueServiceRole`
-   - `AmazonS3FullAccess`
+3. **Attach managed policy:**
+   - `AWSGlueServiceRole` (required — grants Glue control-plane access)
 4. **Role name:** `Glue_Crawler_Role`
 5. **Create role**
+6. Open the new role → **Add permissions** → **Create inline policy** → **JSON** tab, paste (substitute `<YOUR_BUCKET>`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:ListBucket"],
+    "Resource": [
+      "arn:aws:s3:::<YOUR_BUCKET>",
+      "arn:aws:s3:::<YOUR_BUCKET>/Business/*"
+    ]
+  }]
+}
+```
+
+7. **Name:** `CrawlerBusinessRead` → **Create policy**
+
+> **Why read-only on `Business/*`?** The crawler only scans the Parquet output to infer schemas — it never writes. Restricting this role to `s3:GetObject`/`s3:ListBucket` on exactly the prefix the crawler reads eliminates a whole class of "crawler accidentally broke other folders" failure modes.
 
 ### Create the Crawler and Query Data
 
@@ -1045,10 +1406,11 @@ This role was auto-created when you first submitted a batch job in EMR Studio. I
 
 #### 2. Add the StartJobRun Action
 
-1. In the search field, type `emr ser` → select **StartJobRun**
-2. Drag it to the center of the canvas
-3. With it selected, go to the **Arguments & Output** panel on the right
-4. Replace the arguments with the following JSON:
+1. In the search field, type `emr ser` → find **StartJobRun**
+2. **Select the `.sync` variant** — the pattern name ends in `.sync` and the description says *"Wait for job to complete"*. Do NOT pick the plain async version.
+3. Drag it to the center of the canvas
+4. With it selected, go to the **Arguments & Output** panel on the right
+5. Replace the arguments with the following JSON:
 
 ```json
 {
@@ -1061,9 +1423,25 @@ This role was auto-created when you first submitted a batch job in EMR Studio. I
       "EntryPointArguments": [],
       "SparkSubmitParameters": "--conf spark.executor.memory=2g --conf spark.executor.cores=2 --conf spark.driver.memory=2g"
     }
+  },
+  "ConfigurationOverrides": {
+    "MonitoringConfiguration": {
+      "S3MonitoringConfiguration": {
+        "LogUri": "s3://<YOUR_BUCKET>/emr-logs/"
+      }
+    }
   }
 }
 ```
+
+6. In **Error handling** (same right-hand panel), add a **Retry** block — task: `States.ALL`, max attempts: `2`, backoff rate: `2.0`, interval: `10`. Transient EMR failures (throttling, capacity) self-heal on retry.
+7. Add a **Catch** block — errors: `States.ALL`, next state: `FailState` (you'll add this in the next step).
+
+Why this matters: without `.sync`, the state machine returns success the instant the job is **submitted**, even if the job crashes seconds later. With `.sync` the state machine waits for the job to reach a terminal state and returns the actual success/failure.
+
+**Add a Fail state for the Catch block:**
+
+8. Drag a **Fail** state onto the canvas next to the task. Name it `FailState`. Leave default settings — it simply marks the execution as failed when `StartJobRun.sync` raises (e.g. the Spark job fails).
 
 > **Template reference:** `docs/resources/step_function_and_event_bridge_config.md` — contains this template with a table showing where to find each placeholder value.
 
@@ -1102,15 +1480,15 @@ The state machine creation auto-generates an IAM role for Step Functions (named 
 5. Go back to the Step Functions role → **Add permissions** → **Attach policies**
 6. Search and attach:
    - `PassRole`
-   - `AmazonEMRFullAccessPolicy_v2`
 
-The Step Functions role should now have 4 policies:
+The Step Functions role should now have 3 policies:
 | Policy | Purpose |
 |---|---|
 | `XRayAccessPolicy-...` | Auto-created default — X-Ray tracing |
-| `EMRServerlessStartJobRunScopedAccessPolicy-...` | Auto-created default — scoped EMR access |
+| `EMRServerlessStartJobRunScopedAccessPolicy-...` | Auto-created default — scoped EMR access (already enough to call `StartJobRun.sync` on your specific application) |
 | `PassRole` | Allows passing the EMR execution role |
-| `AmazonEMRFullAccessPolicy_v2` | Full EMR access to avoid permission issues |
+
+> **Why we dropped `AmazonEMRFullAccessPolicy_v2`:** Earlier revisions of this guide attached that managed policy "to avoid permission issues". It grants `emr:*` and `emr-serverless:*` on every EMR resource in the account. The auto-generated `EMRServerlessStartJobRunScopedAccessPolicy-*` already covers the exact actions a state machine needs to submit jobs to your specific application, with resource-level scope. Removing `AmazonEMRFullAccessPolicy_v2` tightens the blast radius without losing functionality.
 
 #### 5. Execute the State Machine
 
@@ -1126,16 +1504,18 @@ aws iam create-role \
   --role-name StepFunctions-EMR_Automation \
   --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 
-# 2. Attach EMR full-access policy
-aws iam attach-role-policy \
-  --role-name StepFunctions-EMR_Automation \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEMRFullAccessPolicy_v2
-
-# 3. Attach the PassRole inline policy
+# 2. Attach the PassRole inline policy (scoped to the EMR execution role only)
 aws iam put-role-policy \
   --role-name StepFunctions-EMR_Automation \
   --policy-name PassRole \
   --policy-document file://passrole.json
+
+# 3. Attach a scoped inline policy granting only StartJobRun / GetJobRun / CancelJobRun
+#    on your specific EMR Serverless application (replace <APPLICATION_ARN>):
+aws iam put-role-policy \
+  --role-name StepFunctions-EMR_Automation \
+  --policy-name StartEmrServerlessJob \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["emr-serverless:StartJobRun","emr-serverless:GetJobRun","emr-serverless:CancelJobRun"],"Resource":["<APPLICATION_ARN>","<APPLICATION_ARN>/jobruns/*"]}]}'
 
 # 4. Create the state machine
 aws stepfunctions create-state-machine \
@@ -1369,9 +1749,10 @@ Use the same configuration as the first EC2 instance (Step 2):
 6. **Network settings:**
    - **VPC:** Default VPC (same as before)
    - **Auto-assign public IP:** Enable
-   - **Security group:** Select existing — pick both `launch-wizard-1` (SSH/HTTP) and `default`
-7. **Storage:** 8 GiB
-8. Click **Launch instance**
+   - **Security group:** Select existing — pick both the Kafka-Client SG (with SSH restricted to **My IP**) and `default`. Do NOT reuse any SG that still has an `0.0.0.0/0` rule.
+7. **Advanced details → Metadata version:** `V2 only (token required)`
+8. **Storage:** 30 GiB (Amazon Linux 2023 minimum)
+9. Click **Launch instance**
 
 Or via CLI:
 ```bash
@@ -1380,9 +1761,10 @@ aws ec2 run-instances \
   --instance-type t3.micro \
   --key-name kafka_access \
   --subnet-id <SUBNET_ID> \
-  --security-group-ids <LAUNCH_WIZARD_SG_ID> <DEFAULT_SG_ID> \
+  --security-group-ids <KAFKA_CLIENT_SG_ID> <DEFAULT_SG_ID> \
   --associate-public-ip-address \
-  --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":8}}]' \
+  --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30}}]' \
+  --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=dbt-client}]' \
   --region <YOUR_REGION>
 ```
@@ -1392,68 +1774,133 @@ aws ec2 run-instances \
 1. Go to **EC2** → Select `dbt-client` → **Connect**
 2. Select **EC2 Instance Connect** tab → **Connect**
 
-### Configure AWS Credentials on the Instance
+### Attach an IAM Instance Role for dbt
 
-dbt needs AWS credentials to authenticate to Athena and S3. We create a dedicated **service user** (not a personal user) with only the permissions dbt requires.
+dbt needs AWS credentials to authenticate to Athena, Glue, and S3. Rather than creating an IAM user and pasting access keys onto the instance, **attach an IAM role to the EC2 instance**. The AWS SDK's default credentials chain automatically discovers the role via IMDSv2 — no keys on disk, automatic rotation, no `aws configure` ceremony, and no credentials leak if someone gains shell access.
 
-#### Why a service user?
+This mirrors the pattern used in Step 4 for the Kafka client.
 
-- Named with `svc_` prefix to distinguish from human users
-- Scoped permissions — only Athena, Glue, and S3 access (not admin)
-- Credentials are programmatic (access key + secret) — no Console login
-- Can be rotated or revoked independently without affecting human users
+#### 1. Create the dbt IAM policy
 
-#### 1. Create the IAM user
+1. **AWS Console** → **IAM** → **Policies** → **Create policy**
+2. Switch to **JSON** tab, paste (substitute `<YOUR_BUCKET>` with the pipeline bucket from Step 7 and `<DBT_BUCKET>` with the dbt bucket you'll create in Step 14):
 
-1. **AWS Console** → **IAM** → **Users** → **Create user**
-2. **User name:** `svc_dbt_athena`
-3. **Do NOT** check "Provide user access to the AWS Management Console" — this is a programmatic-only user
-4. Click **Next**
-5. **Attach policies directly** → search and select:
-   - `AmazonAthenaFullAccess` — run queries, manage workgroups
-   - `AWSGlueConsoleFullAccess` — read Glue Data Catalog tables
-   - `AmazonS3FullAccess` — read data from S3, write Athena query results
-6. Click **Next** → **Create user**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AthenaQueries",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:GetWorkGroup",
+        "athena:StopQueryExecution",
+        "athena:ListQueryExecutions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "GlueCatalogRead",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetDatabases",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetPartition",
+        "glue:GetPartitions",
+        "glue:CreateTable",
+        "glue:UpdateTable",
+        "glue:DeleteTable",
+        "glue:BatchCreatePartition",
+        "glue:BatchDeletePartition"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3DataRead",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::<YOUR_BUCKET>",
+        "arn:aws:s3:::<YOUR_BUCKET>/*"
+      ]
+    },
+    {
+      "Sid": "S3DbtWorkspace",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<DBT_BUCKET>",
+        "arn:aws:s3:::<DBT_BUCKET>/*"
+      ]
+    }
+  ]
+}
+```
 
-> **Note:** The trainer uses admin access here. For production, **never give admin access to a service account**. The three policies above are all dbt needs.
+3. **Name:** `dbt_Athena_Access`
+4. **Create policy**
 
-#### 2. Create access keys
+#### 2. Create the role and attach it to the instance
 
-1. Click on the user `svc_dbt_athena`
-2. Go to the **Security credentials** tab
-3. Scroll to **Access keys** → **Create access key**
-4. **Use case:** Select **Command Line Interface (CLI)**
-5. Check the acknowledgement → **Create access key**
-6. **Copy both values** — the Secret Access Key is only shown once
+1. **IAM** → **Roles** → **Create role**
+2. **Trusted entity:** AWS Service → **EC2**
+3. **Attach policies:**
+   - `dbt_Athena_Access` (just created)
+   - `AmazonSSMManagedInstanceCore` (optional but recommended — enables zero-ingress SSM Session Manager access)
+4. **Role name:** `dbt_Athena_Access`
+5. **Create role**
+6. Go to **EC2** → Select `dbt-client` → **Actions** → **Security** → **Modify IAM role**
+7. Select `dbt_Athena_Access` → **Update IAM role**
 
 Or via CLI:
 ```bash
-aws iam create-access-key --user-name svc_dbt_athena
+# 1. Save the policy JSON above as dbt-policy.json, then create the policy + role:
+aws iam create-policy --policy-name dbt_Athena_Access --policy-document file://dbt-policy.json
+
+aws iam create-role \
+  --role-name dbt_Athena_Access \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+aws iam attach-role-policy \
+  --role-name dbt_Athena_Access \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/dbt_Athena_Access
+
+# 2. Create instance profile and add the role
+aws iam create-instance-profile --instance-profile-name dbt_Athena_Access
+aws iam add-role-to-instance-profile \
+  --instance-profile-name dbt_Athena_Access \
+  --role-name dbt_Athena_Access
+
+# 3. Attach the instance profile to the EC2 instance
+aws ec2 associate-iam-instance-profile \
+  --instance-id <DBT_INSTANCE_ID> \
+  --iam-instance-profile Name=dbt_Athena_Access \
+  --region <YOUR_REGION>
 ```
-
-#### 3. Configure AWS CLI on the EC2 instance
-
-In the EC2 Instance Connect terminal:
-
-```bash
-aws configure
-```
-
-Enter when prompted:
-- **AWS Access Key ID:** `<from step 2>`
-- **AWS Secret Access Key:** `<from step 2>`
-- **Default region name:** `<your-region>` (e.g. `eu-north-1`)
-- **Default output format:** leave blank (just hit Enter)
 
 #### Verify
+
+In the EC2 Instance Connect terminal:
 
 ```bash
 aws sts get-caller-identity
 ```
 
-Should return the `svc_dbt_athena` user ARN.
+Should return an `assumed-role/dbt_Athena_Access/...` ARN — meaning the SDK picked up the instance role credentials from IMDSv2 automatically.
 
-> **Terraform:** In a corporate environment where you lack IAM user creation permissions, the service user must be provisioned by your DevOps team. See [14. IAM Service User for dbt](#14-iam-service-user-for-dbt) in the Terraform — All Resources section.
+> **Why not an IAM user + access keys?** Earlier revisions of this guide instructed creating `svc_dbt_athena` as an IAM user and stashing its access key pair via `aws configure`. That approach has three concrete problems: (1) long-lived credentials on disk are the #1 credential-leak vector — anyone with shell access (or a misconfigured backup) can exfiltrate them; (2) rotation is a manual chore that almost never gets done; (3) `aws configure` is explicitly disallowed by the repo's own AWS skill ("NEVER run `aws configure` with access keys"). The instance role approach has zero of these problems: credentials are short-lived, auto-rotated, never land on disk, and never show up in shell history.
+
+> **Terraform:** See [14. IAM Instance Role for dbt](#14-iam-instance-role-for-dbt) in the Terraform — All Resources section.
 
 ### What this step does
 
@@ -1525,7 +1972,7 @@ Follow the interactive prompts:
 | **s3_staging_dir** | `s3://<dbt-bucket>/results/` | Athena writes query results here. Create a dedicated bucket with a `results/` folder. |
 | **s3_data_dir** | `s3://<dbt-bucket>/data/` | dbt stores seed data here. Same bucket, `data/` folder. |
 | **region_name** | `<your-region>` | e.g. `eu-north-1` |
-| **schema** | `athena-dbt-db` | The Glue database where dbt writes its models. **See note below.** |
+| **schema** | `athena_dbt_db` | The Glue database where dbt writes its models. **See note below.** |
 | **database** | Just hit Enter | Defaults to `awsdatacatalog` — the standard Glue Data Catalog name. Only change if using a federated catalog. |
 | **threads** | `4` | Number of models that run in parallel. **See note below.** |
 
@@ -1548,14 +1995,14 @@ aws s3api put-object --bucket <dbt-bucket> --key data/
 
 ### Why a Separate Glue Database for dbt?
 
-We use `athena-dbt-db` instead of the existing `athena-db` to keep a clean separation:
+We use `athena_dbt_db` instead of the existing `athena-db` to keep a clean separation:
 
 | Database | Contains | Created by |
 |---|---|---|
 | `athena-db` | Raw star schema tables (`dim_vendor`, `dim_location`, `dim_payment`, `facts`) | Glue Crawler scanning Business/ parquet files |
-| `athena-dbt-db` | Analytical models (joins, aggregations, marts) | dbt |
+| `athena_dbt_db` | Analytical models (joins, aggregations, marts) | dbt |
 
-dbt reads from `athena-db` via `source()` definitions and writes its models to `athena-dbt-db`. This mirrors production best practice where landing/raw tables and transformation outputs live in separate databases:
+dbt reads from `athena-db` via `source()` definitions and writes its models to `athena_dbt_db`. This mirrors production best practice where landing/raw tables and transformation outputs live in separate databases:
 
 - **Landing database** — raw ingested data
 - **Staging/transformation database** — cleaned, joined, business-logic models
@@ -1585,7 +2032,7 @@ taxi_pipeline:
       s3_staging_dir: s3://<dbt-bucket>/results/
       s3_data_dir: s3://<dbt-bucket>/data/
       region_name: <your-region>
-      schema: athena-dbt-db
+      schema: athena_dbt_db
       database: awsdatacatalog
       threads: 4
   target: dev
@@ -1643,10 +2090,10 @@ The source definitions live in [`docs/dbt/sources.yml`](docs/dbt/sources.yml) �
 |---|---|---|
 | `name` | `taxi_source` | Logical name used in `{{ source() }}` references |
 | `database` | `awsdatacatalog` | The Glue Data Catalog name (always this for Athena) |
-| `schema` | `athena-db` | The Glue database containing the source tables (NOT `athena-dbt-db` — that's where dbt writes) |
+| `schema` | `athena-db` | The Glue database containing the source tables (NOT `athena_dbt_db` — that's where dbt writes) |
 | `tables` | 4 entries | Each Glue table the models will reference |
 
-> **Key distinction:** dbt **reads from** `athena-db` (source tables) and **writes to** `athena-dbt-db` (configured in `profiles.yml` as the `schema`). This keeps raw and transformed data separate.
+> **Key distinction:** dbt **reads from** `athena-db` (source tables) and **writes to** `athena_dbt_db` (configured in `profiles.yml` as the `schema`). This keeps raw and transformed data separate.
 
 ### Install git (dbt dependency)
 
@@ -1692,7 +2139,7 @@ Create each model file by copying the tracked version from `docs/dbt/`:
 
 Each model uses `{{ source('taxi_source', 'table_name') }}` to reference the Glue Catalog tables defined in `sources.yml`, and starts with `{{ config(materialized='table') }}`.
 
-> **`{{ config(materialized='table') }}`** tells dbt to create a physical table in the target database (`athena-dbt-db`). The alternative is `materialized='view'` which creates a virtual view — faster to build but slower to query since it re-runs the SQL on every access.
+> **`{{ config(materialized='table') }}`** tells dbt to create a physical table in the target database (`athena_dbt_db`). The alternative is `materialized='view'` which creates a virtual view — faster to build but slower to query since it re-runs the SQL on every access.
 
 ### Run the Models
 
@@ -1705,16 +2152,16 @@ Expected output:
 ```
 Concurrency: 4 threads (target='dev')
 
-1 of 4 START sql table model athena-dbt-db.daily_avg_fare ......... [RUN]
-2 of 4 START sql table model athena-dbt-db.revenue_by_payment ..... [RUN]
-3 of 4 START sql table model athena-dbt-db.top_routes ............. [RUN]
-4 of 4 START sql table model athena-dbt-db.total_revenue .......... [RUN]
+1 of 4 START sql table model athena_dbt_db.daily_avg_fare ......... [RUN]
+2 of 4 START sql table model athena_dbt_db.revenue_by_payment ..... [RUN]
+3 of 4 START sql table model athena_dbt_db.top_routes ............. [RUN]
+4 of 4 START sql table model athena_dbt_db.total_revenue .......... [RUN]
 ...
 Completed successfully
 Done. PASS=4 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=4
 ```
 
-All 4 models run in parallel (4 threads) and create tables in the `athena-dbt-db` Glue database.
+All 4 models run in parallel (4 threads) and create tables in the `athena_dbt_db` Glue database.
 
 ### Run a specific model
 
@@ -1724,7 +2171,7 @@ dbt run --select total_revenue
 
 ### Verify in Athena
 
-Go to **Athena Console** → select database `athena-dbt-db` → you should see 4 new tables:
+Go to **Athena Console** → select database `athena_dbt_db` → you should see 4 new tables:
 
 | Table | Rows | Description |
 |---|---|---|
@@ -1817,27 +2264,58 @@ dbt auto-generates documentation from your project files:
 
 The docs are served as a web application. In production, you'd typically host them on S3 + CloudFront or use dbt Cloud's built-in docs hosting. For this tutorial, we serve them directly from the EC2 instance.
 
-### Security Group — Open Port 8080
+### Serving the Docs — Two Safe Options
 
-The dbt docs server runs on port 8080. The EC2 security group must allow inbound traffic on this port:
+The dbt docs server on port 8080 is **unauthenticated** — it reveals your full data model (tables, columns, sample SQL) to anyone who can reach that port. Do NOT expose it to `0.0.0.0/0`.
 
-1. **EC2 Console** → Select your instance → **Security** tab
-2. Click the **Security group** link
-3. **Edit inbound rules** → **Add rule**:
+**Option A (recommended): SSH port-forward from your laptop — zero ingress changes**
+
+From your laptop, tunnel 8080 over SSH to the EC2 instance, then serve the docs bound to localhost:
+
+```bash
+# On your laptop (adds a local port → remote port tunnel over SSH Instance Connect)
+aws ec2-instance-connect open-tunnel \
+  --instance-id <DBT_INSTANCE_ID> \
+  --remote-port 8080 \
+  --local-port 8080 \
+  --region <YOUR_REGION> &
+```
+
+Then on the EC2 instance, serve the docs bound to localhost only:
+
+```bash
+cd ~/dbt_athena
+dbt docs generate
+dbt docs serve --host 127.0.0.1 --port 8080
+```
+
+Open `http://localhost:8080` on your laptop. The dbt docs server never listens on a public interface, so no security group rule is needed.
+
+**Option B: Restrict port 8080 to your public IP — small ingress change**
+
+If you prefer a direct browser-to-EC2 connection:
+
+1. **EC2 Console** → Select your instance → **Security** tab → click the **Security group** link
+2. **Edit inbound rules** → **Add rule**:
    - **Type:** Custom TCP
    - **Port:** 8080
-   - **Source:** `0.0.0.0/0` (anywhere)
-4. **Save rules**
+   - **Source:** **My IP** (auto-fills your current public IP as `<YOUR_IP>/32`)
+3. **Save rules**
 
 Or via CLI:
 ```bash
+MY_IP=$(curl -s https://checkip.amazonaws.com)
 aws ec2 authorize-security-group-ingress \
   --group-id <SECURITY_GROUP_ID> \
-  --protocol tcp --port 8080 --cidr 0.0.0.0/0 \
+  --protocol tcp --port 8080 --cidr ${MY_IP}/32 \
   --region <YOUR_REGION>
 ```
 
+> **Do not use `--cidr 0.0.0.0/0`.** The dbt docs site has no authentication — it exposes every table, column, and sample query your project touches. Anyone who scans the public internet for open 8080 ports gets a free map of your data model and the bucket/database names that hold it. Always scope to your own IP, or use SSH port-forwarding (Option A).
+
 ### Generate and Serve
+
+If you chose Option A (SSH port-forward), see the command block above. If you chose Option B (ingress rule):
 
 ```bash
 cd ~/dbt_athena
@@ -1845,23 +2323,33 @@ cd ~/dbt_athena
 # Generate the documentation site
 dbt docs generate
 
-# Start the web server
+# Start the web server (listening on all interfaces — Option B only)
 dbt docs serve --host 0.0.0.0 --port 8080
 ```
 
 - **`dbt docs generate`** — scans the project and builds the documentation as static HTML/JSON
-- **`--host 0.0.0.0`** — listens on all network interfaces, not just localhost. Required for external access.
+- **`--host 0.0.0.0`** — listens on all network interfaces. Only use this with a scoped ingress rule (Option B).
+- **`--host 127.0.0.1`** — listens only on localhost (used with the SSH tunnel in Option A). **Preferred.**
 - **`--port 8080`** — the port the web server runs on
 
 ### View in Browser
 
 Open your browser and navigate to:
 
-```
-http://<EC2_PUBLIC_IP>:8080
-```
+- **Option A:** `http://localhost:8080`
+- **Option B:** `http://<EC2_PUBLIC_IP>:8080` (find the IP in the EC2 Console → your instance → **Public IPv4 address**)
 
-**Where to find the EC2 Public IP:** **EC2 Console** → click your instance → **Public IPv4 address** in the instance details.
+### Revoking the ingress rule after the lab (Option B only)
+
+Don't leave port 8080 open after you're done. Revoke the rule:
+
+```bash
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+aws ec2 revoke-security-group-ingress \
+  --group-id <SECURITY_GROUP_ID> \
+  --protocol tcp --port 8080 --cidr ${MY_IP}/32 \
+  --region <YOUR_REGION>
+```
 
 ### Restarting the Docs Server
 
@@ -1886,6 +2374,36 @@ dbt docs serve --host 0.0.0.0 --port 8080
 
 ---
 
+## Step 18: Cleanup — Tear Down Everything
+
+When you're done with the walkthrough, tear everything down to stop accruing cost. MSK Serverless, EMR Serverless idle state, running EC2 instances, and un-deleted CloudWatch log groups all bill daily.
+
+Use the bundled **[`teardown.sh`](teardown.sh)** script. It walks every resource this guide creates in safe dependency order (triggers → EMR Serverless → Glue → Firehose + MSK → EC2 → S3 → IAM → CloudWatch log groups) and ends with a verification block. It's idempotent — safe to re-run.
+
+**Before running**, open the script and substitute the placeholders with your actual values:
+
+```
+<ACCOUNT_ID>              — aws sts get-caller-identity --profile aws-learn --query Account --output text
+<MSK_CLUSTER_ARN>         — aws kafka list-clusters-v2 --profile aws-learn --region eu-north-1 --query 'ClusterInfoList[?ClusterName==`MSK`].ClusterArn'
+<EMR_APPLICATION_ID>      — aws emr-serverless list-applications --profile aws-learn --region eu-north-1 --query 'applications[?name==`EMR_ETL`].id'
+<KAFKA_CLIENT_INSTANCE_ID>
+<DBT_CLIENT_INSTANCE_ID>  — aws ec2 describe-instances --profile aws-learn --region eu-north-1 --filters 'Name=tag:Name,Values=Kafka-Client,dbt-client' --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`Name`].Value|[0]]' --output table
+<PIPELINE_BUCKET>
+<DBT_BUCKET>              — aws s3api list-buckets --profile aws-learn --query 'Buckets[?starts_with(Name,`ridestreamlakehouse`) || starts_with(Name,`dbt-athena`)].Name'
+```
+
+**Run:**
+
+```bash
+bash realtime_kafka_aws_pipeline/teardown.sh
+```
+
+> **If you applied via Terraform:** `terraform destroy` handles the full dependency graph in one shot — no placeholder substitution needed. The bash script exists for learners who built everything via the Console and never touched Terraform.
+>
+> **Cost sanity check:** 24–48h after teardown, run `aws ce get-cost-and-usage` for `eu-north-1`. An unexpected non-zero bill usually means an EMR Serverless app left in STARTED state, a forgotten S3 bucket with objects, or a CloudWatch log group you didn't delete.
+
+---
+
 ## Terraform Reference
 
 This section provides a complete, copy-pasteable Terraform configuration that reproduces every AWS resource built through the console guide above. You can use it in two ways: **(a)** hand the entire file to your DevOps team so they can provision the pipeline in a repeatable, auditable manner, or **(b)** run it yourself in a sandbox account where you have admin rights, then point your team at the state file for production promotion.
@@ -1894,12 +2412,14 @@ This section provides a complete, copy-pasteable Terraform configuration that re
 
 > **Order matters:** Apply these resources in the order listed. Later resources reference earlier ones (e.g., the MSK cluster references the subnets and security group; the Step Functions state machine references the EMR execution role; EventBridge references the state machine). Terraform handles the dependency graph automatically, but if you apply blocks selectively, follow the ordering below.
 
-Before any `resource` blocks, your `.tf` file needs the standard provider preamble. This tells Terraform which cloud provider plugins to download and which region to target:
+Before any `resource` blocks, your `.tf` file needs the standard provider preamble and input variables. This tells Terraform which cloud provider plugins to download, which region to target, and which values the rest of the config can parameterize.
 
 ### Provider
 
 ```hcl
 terraform {
+  required_version = "~> 1.9"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -1909,101 +2429,264 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 }
 
 provider "aws" {
-  region = "eu-north-1"  # Change to your region
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project     = "realtime-kafka-pipeline"
+      Environment = var.environment
+      Owner       = var.owner
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+# Resolve the current account ID once — reused in ARN conditions below.
+data "aws_caller_identity" "current" {}
+```
+
+### Variables
+
+```hcl
+variable "region" {
+  description = "AWS region for all resources"
+  type        = string
+  default     = "eu-north-1"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z]{2}-[a-z]+-[0-9]+$", var.region))
+    error_message = "Region must be a valid AWS region ID, e.g. eu-north-1."
+  }
+}
+
+variable "environment" {
+  description = "Environment name for resource tagging"
+  type        = string
+  default     = "dev"
+  nullable    = false
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be one of: dev, staging, prod."
+  }
+}
+
+variable "owner" {
+  description = "Owner (email or team name) for cost attribution and ops contact"
+  type        = string
+  default     = "data-platform"
+  nullable    = false
+}
+
+variable "availability_zones" {
+  description = "AZs for MSK subnets (MSK Serverless requires >= 2 AZs)"
+  type        = list(string)
+  default     = ["eu-north-1a", "eu-north-1b"]
+
+  validation {
+    condition     = length(var.availability_zones) >= 2
+    error_message = "MSK Serverless requires at least 2 AZs."
+  }
+}
+
+variable "allowed_ssh_cidr" {
+  description = "CIDR block allowed to SSH into the EC2 instances. Must NOT be 0.0.0.0/0 outside of dev."
+  type        = string
+  default     = "0.0.0.0/0" # Overridden in terraform.tfvars — see note below.
+
+  validation {
+    condition     = can(cidrnetmask(var.allowed_ssh_cidr))
+    error_message = "allowed_ssh_cidr must be a valid CIDR."
+  }
+}
+
+variable "public_key_openssh" {
+  description = "SSH public key (OpenSSH format) uploaded as the EC2 key pair. Leave null to let Terraform generate a keypair (dev only — the private key ends up in state)."
+  type        = string
+  default     = null
+}
+```
+
+> **Set `allowed_ssh_cidr` in a `terraform.tfvars` file (git-ignored), never `0.0.0.0/0` in real environments:**
+>
+> ```hcl
+> # terraform.tfvars  (do NOT commit)
+> allowed_ssh_cidr = "203.0.113.42/32"  # Your public IP — https://checkip.amazonaws.com
+> public_key_openssh = file("~/.ssh/id_ed25519.pub")  # If you want to use your own key
+> ```
+
+### Provider (continued — moved-block migration note)
+
+If you previously applied an earlier version of this Terraform (with `aws_vpc.vpc_kafka`, `aws_subnet.msk_subnet_a`, etc.) and are adopting the renamed/collectioned resources below, include `moved` blocks to avoid destroy-and-recreate:
+
+```hcl
+moved {
+  from = aws_vpc.vpc_kafka
+  to   = aws_vpc.this
+}
+
+moved {
+  from = aws_subnet.msk_subnet_a
+  to   = aws_subnet.msk["eu-north-1a"]
+}
+
+moved {
+  from = aws_subnet.msk_subnet_b
+  to   = aws_subnet.msk["eu-north-1b"]
+}
+
+moved {
+  from = aws_msk_serverless_cluster.msk
+  to   = aws_msk_serverless_cluster.this
+}
+
+moved {
+  from = aws_s3_bucket.pipeline_bucket
+  to   = aws_s3_bucket.pipeline
 }
 ```
 
 ### 1. VPC + Networking
 
 ```hcl
-resource "aws_vpc" "vpc_kafka" {
+resource "aws_vpc" "this" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
+
   tags = { Name = "VPC_Kafka" }
 }
 
-resource "aws_subnet" "msk_subnet_a" {
-  vpc_id            = aws_vpc.vpc_kafka.id
-  cidr_block        = "10.0.1.0/24"
-  availability_zone = "${var.region}a"
-  tags = { Name = "msk_subnet_a" }
+# One subnet per AZ — using for_each keeps resource addresses stable if you
+# reorder the AZ list (count would renumber every subsequent subnet).
+resource "aws_subnet" "msk" {
+  for_each = toset(var.availability_zones)
+
+  vpc_id            = aws_vpc.this.id
+  availability_zone = each.key
+  cidr_block        = cidrsubnet(aws_vpc.this.cidr_block, 8, index(var.availability_zones, each.key) + 1)
+
+  tags = { Name = "msk_subnet_${each.key}" }
 }
 
-resource "aws_subnet" "msk_subnet_b" {
-  vpc_id            = aws_vpc.vpc_kafka.id
-  cidr_block        = "10.0.2.0/24"
-  availability_zone = "${var.region}b"
-  tags = { Name = "msk_subnet_b" }
-}
-
-resource "aws_security_group" "msk_sg" {
+# MSK SG: EC2 client ↔ MSK brokers only, on the specific Kafka ports.
+resource "aws_security_group" "msk" {
   name        = "msk_sg"
-  description = "Security group for MSK Serverless and EC2"
-  vpc_id      = aws_vpc.vpc_kafka.id
+  description = "Security group for MSK Serverless"
+  vpc_id      = aws_vpc.this.id
 
-  ingress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["10.0.0.0/16"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
   tags = { Name = "msk_sg" }
 }
 
-resource "aws_security_group" "ec2_sg" {
-  name        = "ec2_sg"
-  description = "SSH and HTTP access for Kafka client EC2"
-  vpc_id      = aws_vpc.vpc_kafka.id
+resource "aws_vpc_security_group_ingress_rule" "msk_from_client" {
+  for_each = toset(["9092", "9098"]) # 9092 = SASL_SSL on prov. clusters; 9098 = IAM auth
 
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  tags = { Name = "ec2_sg" }
+  security_group_id            = aws_security_group.msk.id
+  from_port                    = tonumber(each.key)
+  to_port                      = tonumber(each.key)
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.ec2_client.id
+  description                  = "Kafka client reaches MSK on ${each.key}"
+}
+
+resource "aws_vpc_security_group_egress_rule" "msk_all_out" {
+  security_group_id = aws_security_group.msk.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  description       = "Allow all egress"
+}
+
+# EC2 client SG: SSH from the operator's IP ONLY. No public HTTP.
+resource "aws_security_group" "ec2_client" {
+  name        = "ec2_client_sg"
+  description = "SSH + outbound for Kafka/dbt client EC2"
+  vpc_id      = aws_vpc.this.id
+
+  tags = { Name = "ec2_client_sg" }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "ec2_ssh" {
+  security_group_id = aws_security_group.ec2_client.id
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
+  cidr_ipv4         = var.allowed_ssh_cidr
+  description       = "SSH from allowed operator IP"
+}
+
+resource "aws_vpc_security_group_egress_rule" "ec2_all_out" {
+  security_group_id = aws_security_group.ec2_client.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  description       = "Allow all egress"
 }
 ```
 
+> **Why `aws_vpc_security_group_ingress_rule` instead of inline `ingress {}` blocks?** The standalone-rule resources are idempotent, allow tagging, and work cleanly with `for_each`. Inline ingress blocks inside `aws_security_group` force Terraform to replace the whole SG when any rule changes — risky when long-lived resources (EC2 instances, MSK brokers) depend on the SG.
+>
+> **Why scope MSK SG to ports 9092/9098 from the EC2 SG (not `10.0.0.0/16`)?** A source SG reference is stricter than a CIDR — it only allows traffic from resources that are members of that specific SG, not every resource that happens to live in the VPC.
+
 ### 2. EC2 Key Pair
 
+Two paths — pick one based on your environment:
+
+**Preferred: upload an existing public key** — no secrets ever touch Terraform state.
+
 ```hcl
-resource "tls_private_key" "kafka_access" {
+# Uses var.public_key_openssh (defined in Variables). If null, falls back to
+# generating a keypair (dev-only path below).
+resource "aws_key_pair" "this" {
+  count = var.public_key_openssh != null ? 1 : 0
+
+  key_name   = "kafka_access"
+  public_key = var.public_key_openssh
+
+  tags = { Name = "kafka_access" }
+}
+```
+
+**Dev-only fallback: let Terraform generate a keypair.** The private key lives in state forever — **never use this for production**. In Terraform 1.11+ you can mark the output as write-only to keep it out of state.
+
+```hcl
+resource "tls_private_key" "generated" {
+  count = var.public_key_openssh == null ? 1 : 0
+
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-resource "aws_key_pair" "kafka_access" {
+resource "aws_key_pair" "generated" {
+  count = var.public_key_openssh == null ? 1 : 0
+
   key_name   = "kafka_access"
-  public_key = tls_private_key.kafka_access.public_key_openssh
+  public_key = tls_private_key.generated[0].public_key_openssh
+
   tags = { Name = "kafka_access" }
 }
 
+# Use a local to pick whichever key pair name exists, so downstream resources
+# reference one attribute regardless of which path was taken.
+locals {
+  kafka_key_name = try(
+    aws_key_pair.this[0].key_name,
+    aws_key_pair.generated[0].key_name,
+  )
+}
+
+# DEV-ONLY: emit the generated private key so you can save it to disk.
+# Retrieve once with: terraform output -raw kafka_private_key > kafka_access.pem; chmod 400 kafka_access.pem
+# Then delete the generated keypair and switch to var.public_key_openssh.
 output "kafka_private_key" {
-  value     = tls_private_key.kafka_access.private_key_pem
+  value     = try(tls_private_key.generated[0].private_key_pem, null)
   sensitive = true
 }
 ```
@@ -2011,41 +2694,58 @@ output "kafka_private_key" {
 ### 3. S3 Bucket
 
 ```hcl
-resource "aws_s3_bucket" "pipeline_bucket" {
-  bucket = "ridestreamlakehouse-<UNIQUE_SUFFIX>"
-  tags   = { Name = "ridestreamlakehouse-<UNIQUE_SUFFIX>" }
+# Generate a short random suffix so bucket names are globally unique without
+# making the developer pick one. Change the prefix if you want a branded name.
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
 }
 
-resource "aws_s3_object" "refined_folder" {
-  bucket = aws_s3_bucket.pipeline_bucket.id
-  key    = "Refined/"
+resource "aws_s3_bucket" "pipeline" {
+  bucket = "ridestreamlakehouse-${random_id.bucket_suffix.hex}"
+
+  tags = { Name = "ridestreamlakehouse-${random_id.bucket_suffix.hex}" }
 }
 
-resource "aws_s3_object" "business_folder" {
-  bucket = aws_s3_bucket.pipeline_bucket.id
-  key    = "Business/"
+resource "aws_s3_bucket_public_access_block" "pipeline" {
+  bucket = aws_s3_bucket.pipeline.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
-resource "aws_s3_object" "scripts_folder" {
-  bucket = aws_s3_bucket.pipeline_bucket.id
-  key    = "scripts/"
+resource "aws_s3_bucket_server_side_encryption_configuration" "pipeline" {
+  bucket = aws_s3_bucket.pipeline.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+    bucket_key_enabled = true
+  }
 }
 
-resource "aws_s3_object" "athena_results_folder" {
-  bucket = aws_s3_bucket.pipeline_bucket.id
-  key    = "athena-results/"
+resource "aws_s3_bucket_versioning" "pipeline" {
+  bucket = aws_s3_bucket.pipeline.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 ```
+
+> **No `aws_s3_object "xxx_folder"` blocks.** S3 has no concept of folders — the `<YYYY>/`, `Refined/`, `Business/` etc. "folders" are simply implicit in object keys. Firehose, Glue, and EMR create the keys they need on their first write. Creating zero-byte folder markers up-front only works if you also pass `content = ""` to `aws_s3_object` (a common apply failure) and adds no real value.
 
 ### 4. MSK Serverless Cluster
 
 ```hcl
-resource "aws_msk_serverless_cluster" "msk" {
+resource "aws_msk_serverless_cluster" "this" {
   cluster_name = "MSK"
 
   vpc_config {
-    subnet_ids         = [aws_subnet.msk_subnet_a.id, aws_subnet.msk_subnet_b.id]
-    security_group_ids = [aws_security_group.msk_sg.id]
+    subnet_ids         = [for s in aws_subnet.msk : s.id]
+    security_group_ids = [aws_security_group.msk.id]
   }
 
   client_authentication {
@@ -2058,6 +2758,58 @@ resource "aws_msk_serverless_cluster" "msk" {
 
   tags = { Name = "MSK" }
 }
+
+# Cluster policy — allows Firehose to read from the cluster (Step 7).
+# NOTE: Firehose requires BOTH a Service-principal statement (for CreateVpcConnection,
+# the only kafka:* action accepted under the Service principal on a cluster policy)
+# AND an AWS role-arn principal statement (for the kafka-cluster:* data-plane actions,
+# which MSK cluster policies accept ONLY under an IAM role ARN principal, not Service).
+resource "aws_msk_cluster_policy" "firehose_read" {
+  cluster_arn = aws_msk_serverless_cluster.this.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "FirehoseServiceCreateVpcConnection"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action    = "kafka:CreateVpcConnection"
+        Resource  = aws_msk_serverless_cluster.this.arn
+      },
+      {
+        Sid       = "FirehoseRoleClusterAccess"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose.arn }
+        Action = [
+          "kafka:GetBootstrapBrokers",
+          "kafka:DescribeCluster",
+          "kafka:DescribeClusterV2",
+          "kafka-cluster:Connect",
+        ]
+        Resource = aws_msk_serverless_cluster.this.arn
+      },
+      {
+        Sid       = "FirehoseRoleTopicAccess"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose.arn }
+        Action = [
+          "kafka-cluster:DescribeTopic",
+          "kafka-cluster:DescribeTopicDynamicConfiguration",
+          "kafka-cluster:ReadData",
+        ]
+        Resource = "arn:aws:kafka:${var.region}:${data.aws_caller_identity.current.account_id}:topic/${aws_msk_serverless_cluster.this.cluster_name}/*/*"
+      },
+      {
+        Sid       = "FirehoseRoleGroupAccess"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose.arn }
+        Action    = "kafka-cluster:DescribeGroup"
+        Resource  = "arn:aws:kafka:${var.region}:${data.aws_caller_identity.current.account_id}:group/${aws_msk_serverless_cluster.this.cluster_name}/*/*"
+      }
+    ]
+  })
+}
 ```
 
 ### 5. EC2 Instance (Kafka Client)
@@ -2066,6 +2818,7 @@ resource "aws_msk_serverless_cluster" "msk" {
 data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
+
   filter {
     name   = "name"
     values = ["al2023-ami-*-x86_64"]
@@ -2075,13 +2828,21 @@ data "aws_ami" "amazon_linux" {
 resource "aws_instance" "kafka_client" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = "t3.micro"
-  key_name               = aws_key_pair.kafka_access.key_name
-  subnet_id              = aws_subnet.msk_subnet_a.id
-  vpc_security_group_ids = [aws_security_group.msk_sg.id, aws_security_group.ec2_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.kafka_instance_profile.name
+  key_name               = local.kafka_key_name
+  subnet_id              = aws_subnet.msk[var.availability_zones[0]].id
+  vpc_security_group_ids = [aws_security_group.msk.id, aws_security_group.ec2_client.id]
+  iam_instance_profile   = aws_iam_instance_profile.kafka_client.name
+
+  # Enforce IMDSv2 (HttpTokens=required). Prevents SSRF-based credential theft.
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+    http_endpoint               = "enabled"
+  }
 
   root_block_device {
-    volume_size = 8
+    volume_size = 30
+    encrypted   = true
   }
 
   tags = { Name = "Kafka-Client" }
@@ -2089,6 +2850,8 @@ resource "aws_instance" "kafka_client" {
 ```
 
 ### 6. IAM — EC2 → MSK Access
+
+> **[IAM — requires DevOps elevated permissions]**
 
 ```hcl
 resource "aws_iam_policy" "access_to_kafka_cluster" {
@@ -2101,23 +2864,23 @@ resource "aws_iam_policy" "access_to_kafka_cluster" {
       {
         Effect   = "Allow"
         Action   = ["kafka-cluster:Connect", "kafka-cluster:DescribeCluster"]
-        Resource = "*"
+        Resource = aws_msk_serverless_cluster.this.arn
       },
       {
         Effect   = "Allow"
         Action   = ["kafka-cluster:CreateTopic", "kafka-cluster:WriteData", "kafka-cluster:ReadData", "kafka-cluster:DescribeTopic"]
-        Resource = "*"
+        Resource = "${aws_msk_serverless_cluster.this.arn}/*"
       },
       {
         Effect   = "Allow"
-        Action   = ["kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup", "kafka-cluster:ReadData"]
-        Resource = "*"
+        Action   = ["kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
+        Resource = "${aws_msk_serverless_cluster.this.arn}/*"
       }
     ]
   })
 }
 
-resource "aws_iam_role" "kafka_cluster_access" {
+resource "aws_iam_role" "kafka_client" {
   name = "Kafka_Cluster_Access"
 
   assume_role_policy = jsonencode({
@@ -2130,23 +2893,40 @@ resource "aws_iam_role" "kafka_cluster_access" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "kafka_policy_attach" {
-  role       = aws_iam_role.kafka_cluster_access.name
+resource "aws_iam_role_policy_attachment" "kafka_client_msk" {
+  role       = aws_iam_role.kafka_client.name
   policy_arn = aws_iam_policy.access_to_kafka_cluster.arn
 }
 
-resource "aws_iam_instance_profile" "kafka_instance_profile" {
-  name = "Kafka_Cluster_Access"
-  role = aws_iam_role.kafka_cluster_access.name
+# Optional but recommended: enable zero-ingress access via SSM Session Manager.
+resource "aws_iam_role_policy_attachment" "kafka_client_ssm" {
+  role       = aws_iam_role.kafka_client.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# Instance profile must have a DIFFERENT name from the role it wraps to avoid
+# console/role collisions during partial manual operations.
+resource "aws_iam_instance_profile" "kafka_client" {
+  name = "Kafka_Client_Instance_Profile"
+  role = aws_iam_role.kafka_client.name
 }
 ```
 
 ### 7. IAM + Firehose Stream
 
+> **[IAM — requires DevOps elevated permissions]**
+
 ```hcl
-resource "aws_iam_role" "firehose_role" {
+resource "aws_iam_role" "firehose" {
   name = "KinesisFirehoseServiceRole"
 
+  # IMPORTANT: No `aws:SourceAccount` (or `aws:SourceArn`) StringEquals condition
+  # here. Firehose's managed code path that calls kafka:CreateVpcConnection
+  # internally does so outside the normal delivery-stream context and the
+  # SourceAccount key isn't populated at that layer. Leaving the condition in
+  # place causes a silent assume-role denial that surfaces (misleadingly) as
+  # "AWS Firehose is not authorized to perform kafka:CreateVpcConnection on
+  # resource arn:aws:iam::.../role/..." when creating the stream.
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -2157,14 +2937,105 @@ resource "aws_iam_role" "firehose_role" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "firehose_s3" {
-  role       = aws_iam_role.firehose_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+# Scoped inline policy — control-plane + data-plane MSK + EC2 PrivateLink + S3 + logs.
+# Replaces AmazonMSKFullAccess + AmazonS3FullAccess from earlier versions.
+resource "aws_iam_role_policy" "firehose_scoped" {
+  name = "FirehosePipelineAccess"
+  role = aws_iam_role.firehose.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "MSKControlPlane"
+        Effect = "Allow"
+        Action = [
+          "kafka:CreateVpcConnection",
+          "kafka:DeleteVpcConnection",
+          "kafka:DescribeVpcConnection",
+          "kafka:DescribeCluster",
+          "kafka:DescribeClusterV2",
+          "kafka:GetBootstrapBrokers",
+        ]
+        Resource = [
+          aws_msk_serverless_cluster.this.arn,
+          "arn:aws:kafka:${var.region}:${data.aws_caller_identity.current.account_id}:vpc-connection/*",
+        ]
+      },
+      {
+        Sid    = "MSKDataPlane"
+        Effect = "Allow"
+        Action = [
+          "kafka-cluster:Connect",
+          "kafka-cluster:DescribeCluster",
+          "kafka-cluster:DescribeTopic",
+          "kafka-cluster:DescribeTopicDynamicConfiguration",
+          "kafka-cluster:ReadData",
+          "kafka-cluster:DescribeGroup",
+          "kafka-cluster:AlterGroup",
+        ]
+        Resource = [
+          aws_msk_serverless_cluster.this.arn,
+          "arn:aws:kafka:${var.region}:${data.aws_caller_identity.current.account_id}:topic/${aws_msk_serverless_cluster.this.cluster_name}/*/*",
+          "arn:aws:kafka:${var.region}:${data.aws_caller_identity.current.account_id}:group/${aws_msk_serverless_cluster.this.cluster_name}/*/*",
+        ]
+      },
+      {
+        # Firehose provisions a PrivateLink VPC interface endpoint in your VPC
+        # on stream creation. Without ec2:CreateTags specifically, endpoint
+        # provisioning fails silently and Firehose stays in CREATING or flips
+        # to ACTIVE but reads nothing. AWS MSK multi-VPC client permissions
+        # docs list these as required for any service acting as an MSK client.
+        Sid    = "EC2PrivateLink"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+          "ec2:CreateVpcEndpoint",
+          "ec2:DescribeVpcEndpoints",
+          "ec2:DeleteVpcEndpoints",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:CreateNetworkInterface",
+          "ec2:DeleteNetworkInterface",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeRouteTables",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "S3Write"
+        Effect = "Allow"
+        Action = [
+          "s3:AbortMultipartUpload",
+          "s3:GetBucketLocation",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:ListBucketMultipartUploads",
+          "s3:PutObject",
+        ]
+        Resource = [
+          aws_s3_bucket.pipeline.arn,
+          "${aws_s3_bucket.pipeline.arn}/*",
+        ]
+      },
+      {
+        Sid      = "CloudWatchLogs"
+        Effect   = "Allow"
+        Action   = ["logs:PutLogEvents", "logs:CreateLogStream"]
+        Resource = "${aws_cloudwatch_log_group.firehose.arn}:*"
+      }
+    ]
+  })
 }
 
-resource "aws_iam_role_policy_attachment" "firehose_msk" {
-  role       = aws_iam_role.firehose_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonMSKFullAccess"
+# Explicit log group with bounded retention. Without this, Firehose auto-creates
+# the log group on first write with "Never Expire" retention — unbounded cost.
+resource "aws_cloudwatch_log_group" "firehose" {
+  name              = "/aws/kinesisfirehose/MSK_Batch"
+  retention_in_days = 14
+
+  tags = { Name = "MSK_Batch" }
 }
 
 resource "aws_kinesis_firehose_delivery_stream" "msk_batch" {
@@ -2172,27 +3043,43 @@ resource "aws_kinesis_firehose_delivery_stream" "msk_batch" {
   destination = "extended_s3"
 
   extended_s3_configuration {
-    role_arn   = aws_iam_role.firehose_role.arn
-    bucket_arn = aws_s3_bucket.pipeline_bucket.arn
+    role_arn           = aws_iam_role.firehose.arn
+    bucket_arn         = aws_s3_bucket.pipeline.arn
     buffering_size     = 5
     buffering_interval = 300
+
+    cloudwatch_logging_options {
+      enabled         = true
+      log_group_name  = aws_cloudwatch_log_group.firehose.name
+      log_stream_name = "DestinationDelivery"
+    }
   }
 
   msk_source_configuration {
     authentication_configuration {
       connectivity = "PRIVATE"
-      role_arn     = aws_iam_role.firehose_role.arn
+      role_arn     = aws_iam_role.firehose.arn
     }
-    msk_cluster_arn = aws_msk_serverless_cluster.msk.arn
+
+    msk_cluster_arn = aws_msk_serverless_cluster.this.arn
     topic_name      = "realtimeridedata"
   }
+
+  tags = { Name = "MSK_Batch" }
+
+  depends_on = [
+    aws_iam_role_policy.firehose_scoped,
+    aws_msk_cluster_policy.firehose_read,
+  ]
 }
 ```
 
 ### 8. IAM + Glue ETL Job
 
+> **[IAM — requires DevOps elevated permissions]**
+
 ```hcl
-resource "aws_iam_role" "glue_etl_role" {
+resource "aws_iam_role" "glue_etl" {
   name = "Glue_S3_msk_access"
 
   assume_role_policy = jsonencode({
@@ -2205,23 +3092,53 @@ resource "aws_iam_role" "glue_etl_role" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "glue_etl_s3" {
-  role       = aws_iam_role.glue_etl_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-}
-
-resource "aws_iam_role_policy_attachment" "glue_etl_console" {
-  role       = aws_iam_role.glue_etl_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
-}
-
+# Required managed policy — grants Glue control-plane access (narrow, AWS-scoped).
 resource "aws_iam_role_policy_attachment" "glue_etl_service" {
-  role       = aws_iam_role.glue_etl_role.name
+  role       = aws_iam_role.glue_etl.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
 }
 
+# Scoped inline — write only the pipeline bucket plus the Glue assets bucket
+# (where Glue stores the auto-generated PySpark script).
+resource "aws_iam_role_policy" "glue_etl_s3" {
+  name = "GluePipelineBucketAccess"
+  role = aws_iam_role.glue_etl.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ]
+      Resource = [
+        aws_s3_bucket.pipeline.arn,
+        "${aws_s3_bucket.pipeline.arn}/*",
+        "arn:aws:s3:::aws-glue-assets-${data.aws_caller_identity.current.account_id}-${var.region}",
+        "arn:aws:s3:::aws-glue-assets-${data.aws_caller_identity.current.account_id}-${var.region}/*",
+      ]
+    }]
+  })
+}
+
+# Account-scoped Glue log groups with bounded retention. These are SHARED across
+# every Glue job in the account — if you already have other Glue workloads, skip
+# these and set retention on the existing groups via the console.
+resource "aws_cloudwatch_log_group" "glue_jobs_output" {
+  name              = "/aws-glue/jobs/output"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "glue_jobs_error" {
+  name              = "/aws-glue/jobs/error"
+  retention_in_days = 14
+}
+
 resource "aws_s3_object" "glue_script" {
-  bucket = aws_s3_bucket.pipeline_bucket.id
+  bucket = aws_s3_bucket.pipeline.id
   key    = "scripts/RAW_TO_REFINED.py"
   source = "${path.module}/scripts/RAW_TO_REFINED.py"
   etag   = filemd5("${path.module}/scripts/RAW_TO_REFINED.py")
@@ -2229,11 +3146,11 @@ resource "aws_s3_object" "glue_script" {
 
 resource "aws_glue_job" "raw_to_refined" {
   name     = "RAW_TO_REFINED"
-  role_arn = aws_iam_role.glue_etl_role.arn
+  role_arn = aws_iam_role.glue_etl.arn
 
   command {
     name            = "glueetl"
-    script_location = "s3://${aws_s3_bucket.pipeline_bucket.id}/scripts/RAW_TO_REFINED.py"
+    script_location = "s3://${aws_s3_bucket.pipeline.id}/scripts/RAW_TO_REFINED.py"
     python_version  = "3"
   }
 
@@ -2242,6 +3159,16 @@ resource "aws_glue_job" "raw_to_refined" {
   number_of_workers = 2
   max_retries       = 0
   timeout           = 480
+
+  # Enable job bookmarks to avoid re-processing already-seen files. Without this,
+  # re-runs re-read ALL raw files and re-write Refined/, which re-triggers the
+  # EventBridge rule in Section 12 → infinite EMR loop.
+  default_arguments = {
+    "--job-bookmark-option" = "job-bookmark-enable"
+    "--enable-metrics"      = "true"
+  }
+
+  tags = { Name = "RAW_TO_REFINED" }
 }
 ```
 
@@ -2249,7 +3176,7 @@ resource "aws_glue_job" "raw_to_refined" {
 
 ```hcl
 resource "aws_s3_object" "emr_script" {
-  bucket = aws_s3_bucket.pipeline_bucket.id
+  bucket = aws_s3_bucket.pipeline.id
   key    = "scripts/emr_spark_job.py"
   source = "${path.module}/scripts/emr_spark_job.py"
   etag   = filemd5("${path.module}/scripts/emr_spark_job.py")
@@ -2257,19 +3184,33 @@ resource "aws_s3_object" "emr_script" {
 
 resource "aws_emrserverless_application" "emr_etl" {
   name          = "EMR_ETL"
-  release_label = "emr-7.7.0"
+  release_label = "emr-7.7.0" # Check current at https://docs.aws.amazon.com/emr/latest/ReleaseGuide/
   type          = "SPARK"
+
+  auto_stop_configuration {
+    enabled              = true
+    idle_timeout_minutes = 15 # Scale to zero after 15 minutes idle.
+  }
 
   tags = { Name = "EMR_ETL" }
 }
+
+# Capture driver/executor logs for debugging failed runs.
+# Without this, a failed EMR run leaves no recoverable logs.
+resource "aws_cloudwatch_log_group" "emr_serverless" {
+  name              = "/aws/emr-serverless/applications/EMR_ETL"
+  retention_in_days = 14
+}
 ```
 
-> **Note:** EMR Serverless job runs are submitted via CLI or Step Functions, not Terraform. Terraform creates the application; job submission is orchestrated separately.
+> **Note:** EMR Serverless job runs are submitted via CLI or Step Functions (Section 11 wires in a `ConfigurationOverrides.MonitoringConfiguration` pointing at `s3://<bucket>/emr-logs/` — the state-machine definition captures logs to S3 on every run).
 
 ### 10. IAM + Glue Crawler + Glue Database
 
+> **[IAM — requires DevOps elevated permissions]**
+
 ```hcl
-resource "aws_iam_role" "glue_crawler_role" {
+resource "aws_iam_role" "glue_crawler" {
   name = "Glue_Crawler_Role"
 
   assume_role_policy = jsonencode({
@@ -2283,35 +3224,109 @@ resource "aws_iam_role" "glue_crawler_role" {
 }
 
 resource "aws_iam_role_policy_attachment" "crawler_service" {
-  role       = aws_iam_role.glue_crawler_role.name
+  role       = aws_iam_role.glue_crawler.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
 }
 
-resource "aws_iam_role_policy_attachment" "crawler_s3" {
-  role       = aws_iam_role.glue_crawler_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+# Read-only access to the Business/ prefix — the crawler only infers schemas,
+# never writes S3. Replaces AmazonS3FullAccess from the previous version.
+resource "aws_iam_role_policy" "crawler_read" {
+  name = "CrawlerBusinessRead"
+  role = aws_iam_role.glue_crawler.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:ListBucket"]
+      Resource = [
+        aws_s3_bucket.pipeline.arn,
+        "${aws_s3_bucket.pipeline.arn}/Business/*",
+      ]
+    }]
+  })
 }
 
 resource "aws_glue_catalog_database" "athena_db" {
   name = "athena-db"
 }
 
-resource "aws_glue_crawler" "business_crawler" {
+resource "aws_glue_crawler" "business" {
   name          = "Business_Data_Crawler"
-  role          = aws_iam_role.glue_crawler_role.arn
+  role          = aws_iam_role.glue_crawler.arn
   database_name = aws_glue_catalog_database.athena_db.name
 
   s3_target {
-    path = "s3://${aws_s3_bucket.pipeline_bucket.id}/Business/processed/"
+    path = "s3://${aws_s3_bucket.pipeline.id}/Business/processed/"
   }
+
+  tags = { Name = "Business_Data_Crawler" }
+}
+
+# Shared Glue crawler log group — account-scoped.
+resource "aws_cloudwatch_log_group" "glue_crawlers" {
+  name              = "/aws-glue/crawlers"
+  retention_in_days = 14
 }
 ```
 
 ### 11. Step Functions State Machine
 
+> **[IAM — requires DevOps elevated permissions]**
+
 ```hcl
-# --- IAM Role for Step Functions ---
-resource "aws_iam_role" "step_functions_role" {
+# --- EMR Execution Role ---
+# Trust policy: Allow emr-serverless.amazonaws.com to assume, restricted to
+# jobs launched by our own account/applications. StringEquals for SourceAccount
+# (exact 12-digit match) and StringLike for SourceArn (wildcard /applications/*).
+resource "aws_iam_role" "emr_execution" {
+  name = "AmazonEMR-ExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "ServerlessTrustPolicy"
+      Effect    = "Allow"
+      Principal = { Service = "emr-serverless.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+        }
+        StringLike = {
+          "aws:SourceArn" = "arn:aws:emr-serverless:${var.region}:${data.aws_caller_identity.current.account_id}:/applications/*"
+        }
+      }
+    }]
+  })
+}
+
+# Scoped S3 access for EMR to read scripts + write Business/ + emr-logs/.
+resource "aws_iam_role_policy" "emr_exec_s3" {
+  name = "EmrExecS3Access"
+  role = aws_iam_role.emr_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:AbortMultipartUpload", "s3:ListBucketMultipartUploads"]
+      Resource = [
+        aws_s3_bucket.pipeline.arn,
+        "${aws_s3_bucket.pipeline.arn}/*",
+      ]
+    }]
+  })
+}
+
+# Glue catalog access so Spark can register Gold tables if needed.
+resource "aws_iam_role_policy_attachment" "emr_exec_glue" {
+  role       = aws_iam_role.emr_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+}
+
+# --- Step Functions Role ---
+resource "aws_iam_role" "step_functions" {
   name = "StepFunctions-EMR_Automation"
 
   assume_role_policy = jsonencode({
@@ -2324,101 +3339,137 @@ resource "aws_iam_role" "step_functions_role" {
   })
 }
 
-# PassRole — allows Step Functions to pass the EMR execution role to EMR Serverless
-resource "aws_iam_policy" "pass_role" {
+# PassRole — allows Step Functions to hand the EMR execution role to EMR Serverless.
+resource "aws_iam_role_policy" "sfn_pass_role" {
   name = "PassRole"
+  role = aws_iam_role.step_functions.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect   = "Allow"
       Action   = "iam:PassRole"
-      Resource = aws_iam_role.emr_execution_role.arn
+      Resource = aws_iam_role.emr_execution.arn
     }]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "sfn_pass_role" {
-  role       = aws_iam_role.step_functions_role.name
-  policy_arn = aws_iam_policy.pass_role.arn
-}
+# Scoped EMR Serverless access — only actions needed to submit & track jobs
+# on OUR specific application. Replaces AmazonEMRFullAccessPolicy_v2.
+resource "aws_iam_role_policy" "sfn_emr_scoped" {
+  name = "StartEmrServerlessJob"
+  role = aws_iam_role.step_functions.id
 
-resource "aws_iam_role_policy_attachment" "sfn_emr_full" {
-  role       = aws_iam_role.step_functions_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEMRFullAccessPolicy_v2"
-}
-
-# --- EMR Execution Role (if not auto-created via Console) ---
-resource "aws_iam_role" "emr_execution_role" {
-  name = "AmazonEMR-ExecutionRole"
-
-  assume_role_policy = jsonencode({
+  policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid       = "ServerlessTrustPolicy"
-      Effect    = "Allow"
-      Principal = { Service = "emr-serverless.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-      Condition = {
-        StringLike = {
-          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
-          "aws:SourceArn"     = "arn:aws:emr-serverless:${var.region}:${data.aws_caller_identity.current.account_id}:/applications/*"
-        }
-      }
+      Effect = "Allow"
+      Action = [
+        "emr-serverless:StartJobRun",
+        "emr-serverless:GetJobRun",
+        "emr-serverless:CancelJobRun",
+        "emr-serverless:TagResource",
+      ]
+      Resource = [
+        aws_emrserverless_application.emr_etl.arn,
+        "${aws_emrserverless_application.emr_etl.arn}/jobruns/*",
+      ]
     }]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "emr_exec_s3" {
-  role       = aws_iam_role.emr_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+# Logging destination for the state machine.
+resource "aws_cloudwatch_log_group" "sfn" {
+  name              = "/aws/vendedlogs/states/EMR_Automation-Logs"
+  retention_in_days = 14
 }
 
-resource "aws_iam_role_policy_attachment" "emr_exec_glue" {
-  role       = aws_iam_role.emr_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
-}
+resource "aws_iam_role_policy" "sfn_logs" {
+  name = "StateMachineLogs"
+  role = aws_iam_role.step_functions.id
 
-data "aws_caller_identity" "current" {}
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["logs:CreateLogDelivery", "logs:GetLogDelivery", "logs:UpdateLogDelivery", "logs:DeleteLogDelivery", "logs:ListLogDeliveries", "logs:PutResourcePolicy", "logs:DescribeResourcePolicies", "logs:DescribeLogGroups"]
+      Resource = "*"
+    }]
+  })
+}
 
 # --- State Machine ---
 resource "aws_sfn_state_machine" "emr_automation" {
   name     = "EMR_Automation"
-  role_arn = aws_iam_role.step_functions_role.arn
+  role_arn = aws_iam_role.step_functions.arn
 
   definition = jsonencode({
-    Comment = "Triggers EMR Spark job for dimensional modelling"
+    Comment = "Triggers EMR Spark job for dimensional modelling (sync — waits for completion)"
     StartAt = "StartJobRun"
     States = {
       StartJobRun = {
-        Type     = "Task"
+        Type = "Task"
+        # .sync waits for the job to reach a terminal state and reports its
+        # actual success/failure. Without .sync the task returns the instant
+        # the job is SUBMITTED, masking crashes.
         Resource = "arn:aws:states:::emr-serverless:startJobRun.sync"
         Parameters = {
-          "ApplicationId" = aws_emrserverless_application.emr_etl.id
-          "Name"          = "EMR_Step_Function_job"
-          "ExecutionRoleArn" = aws_iam_role.emr_execution_role.arn
-          "JobDriver" = {
-            "SparkSubmit" = {
-              "EntryPoint"            = "s3://${aws_s3_bucket.pipeline_bucket.id}/scripts/emr_spark_job.py"
-              "EntryPointArguments"   = []
-              "SparkSubmitParameters" = "--conf spark.executor.memory=2g --conf spark.executor.cores=2 --conf spark.driver.memory=2g"
+          ApplicationId    = aws_emrserverless_application.emr_etl.id
+          Name             = "EMR_Step_Function_job"
+          ExecutionRoleArn = aws_iam_role.emr_execution.arn
+          JobDriver = {
+            SparkSubmit = {
+              EntryPoint            = "s3://${aws_s3_bucket.pipeline.id}/scripts/emr_spark_job.py"
+              EntryPointArguments   = []
+              SparkSubmitParameters = "--conf spark.executor.memory=2g --conf spark.executor.cores=2 --conf spark.driver.memory=2g"
+            }
+          }
+          ConfigurationOverrides = {
+            MonitoringConfiguration = {
+              S3MonitoringConfiguration = {
+                LogUri = "s3://${aws_s3_bucket.pipeline.id}/emr-logs/"
+              }
             }
           }
         }
+        Retry = [{
+          ErrorEquals     = ["States.ALL"]
+          IntervalSeconds = 10
+          MaxAttempts     = 2
+          BackoffRate     = 2.0
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "FailState"
+        }]
         End = true
+      }
+      FailState = {
+        Type  = "Fail"
+        Cause = "EMR Spark job failed after retries exhausted"
       }
     }
   })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.sfn.arn}:*"
+    include_execution_data = true
+    level                  = "ERROR"
+  }
+
+  tags = { Name = "EMR_Automation" }
 }
 ```
 
-> **Note on EMR Execution Role trust policy:** The `aws:SourceArn` condition uses a wildcard (`/applications/*`) instead of a specific application ID. This prevents the trust policy from breaking if the EMR application is recreated. In a locked-down production environment, scope this to the specific application ARN.
+> **Note on EMR Execution Role trust policy:** `aws:SourceAccount` uses `StringEquals` (the value is an exact 12-digit account ID), while `aws:SourceArn` uses `StringLike` so it can match `/applications/*`. Mixing these up (e.g. `StringLike` on SourceAccount) causes IAM to reject the trust policy silently at assume time.
 
 ### 12. EventBridge Rule
 
+> **[IAM — requires DevOps elevated permissions]**
+
 ```hcl
 # --- IAM Role for EventBridge ---
-resource "aws_iam_role" "eventbridge_sfn_role" {
+resource "aws_iam_role" "eventbridge_sfn" {
   name = "EventBridge_StepFunction_Role"
 
   assume_role_policy = jsonencode({
@@ -2431,9 +3482,12 @@ resource "aws_iam_role" "eventbridge_sfn_role" {
   })
 }
 
+# ONLY permission needed: start this specific state machine. No S3 access,
+# no broad permissions. The AmazonS3FullAccess attachment from earlier revisions
+# was unrelated to the actual required permission scope.
 resource "aws_iam_role_policy" "eventbridge_invoke_sfn" {
   name = "InvokeStepFunction"
-  role = aws_iam_role.eventbridge_sfn_role.id
+  role = aws_iam_role.eventbridge_sfn.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -2445,14 +3499,9 @@ resource "aws_iam_role_policy" "eventbridge_invoke_sfn" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "eventbridge_s3" {
-  role       = aws_iam_role.eventbridge_sfn_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-}
-
 # --- Enable EventBridge notifications on the S3 bucket ---
-resource "aws_s3_bucket_notification" "eventbridge_notification" {
-  bucket      = aws_s3_bucket.pipeline_bucket.id
+resource "aws_s3_bucket_notification" "pipeline_eventbridge" {
+  bucket      = aws_s3_bucket.pipeline.id
   eventbridge = true
 }
 
@@ -2466,7 +3515,7 @@ resource "aws_cloudwatch_event_rule" "refined_upload" {
     detail-type = ["Object Created"]
     detail = {
       bucket = {
-        name = [aws_s3_bucket.pipeline_bucket.id]
+        name = [aws_s3_bucket.pipeline.id]
       }
       object = {
         key = [{
@@ -2475,15 +3524,21 @@ resource "aws_cloudwatch_event_rule" "refined_upload" {
       }
     }
   })
+
+  tags = { Name = "Refined_bucket_Upload" }
+
+  depends_on = [aws_s3_bucket_notification.pipeline_eventbridge]
 }
 
 resource "aws_cloudwatch_event_target" "sfn_target" {
   rule      = aws_cloudwatch_event_rule.refined_upload.name
   target_id = "EMR_Automation"
   arn       = aws_sfn_state_machine.emr_automation.arn
-  role_arn  = aws_iam_role.eventbridge_sfn_role.arn
+  role_arn  = aws_iam_role.eventbridge_sfn.arn
 }
 ```
+
+> **`Object Created` matches all PUT/POST/CopyObject/CompleteMultipartUpload events.** Spark writes to Parquet can exceed 5 MB and trigger multipart uploads; the "Object Created" filter covers that path too.
 
 ### 13. EC2 Instance (dbt Client)
 
@@ -2491,80 +3546,150 @@ resource "aws_cloudwatch_event_target" "sfn_target" {
 resource "aws_instance" "dbt_client" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = "t3.micro"
-  key_name               = aws_key_pair.kafka_access.key_name
-  subnet_id              = aws_subnet.msk_subnet_a.id
-  vpc_security_group_ids = [aws_security_group.msk_sg.id, aws_security_group.ec2_sg.id]
+  key_name               = local.kafka_key_name
+  subnet_id              = aws_subnet.msk[var.availability_zones[0]].id
+  vpc_security_group_ids = [aws_security_group.ec2_client.id]
+  iam_instance_profile   = aws_iam_instance_profile.dbt.name # NO static credentials — see Section 14.
+
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+    http_endpoint               = "enabled"
+  }
 
   root_block_device {
-    volume_size = 8
+    volume_size = 30
+    encrypted   = true
   }
 
   tags = { Name = "dbt-client" }
 }
 ```
 
-### 14. IAM Service User for dbt
+### 14. IAM Instance Role for dbt
 
-Creates a dedicated IAM service user (`svc_dbt_athena`) with programmatic-only credentials for dbt to authenticate against Athena, Glue, and S3. Access keys are emitted as Terraform outputs — retrieve the secret once with `terraform output -raw svc_dbt_secret_key` and store it in the EC2 instance's `~/.aws/credentials` or inject into CI/CD secrets. Corresponds to **Step 13 — Configure AWS Credentials on the Instance**.
+> **[IAM — requires DevOps elevated permissions]**
+
+Uses an **EC2 instance role**, not an IAM user with access keys. dbt reads credentials from IMDSv2 at runtime — short-lived, auto-rotated, never written to disk.
 
 ```hcl
-resource "aws_iam_user" "svc_dbt_athena" {
-  name = "svc_dbt_athena"
-  tags = { Name = "svc_dbt_athena" }
+resource "aws_iam_role" "dbt" {
+  name = "dbt_Athena_Access"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
 }
 
-resource "aws_iam_user_policy_attachment" "dbt_athena" {
-  user       = aws_iam_user.svc_dbt_athena.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonAthenaFullAccess"
+resource "aws_iam_role_policy" "dbt_access" {
+  name = "DbtAthenaAccess"
+  role = aws_iam_role.dbt.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AthenaQueries"
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:GetWorkGroup",
+          "athena:StopQueryExecution",
+          "athena:ListQueryExecutions",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "GlueCatalog"
+        Effect = "Allow"
+        Action = [
+          "glue:GetDatabase",
+          "glue:GetDatabases",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetPartition",
+          "glue:GetPartitions",
+          "glue:CreateTable",
+          "glue:UpdateTable",
+          "glue:DeleteTable",
+          "glue:BatchCreatePartition",
+          "glue:BatchDeletePartition",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "S3PipelineRead"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [
+          aws_s3_bucket.pipeline.arn,
+          "${aws_s3_bucket.pipeline.arn}/*",
+        ]
+      },
+      {
+        Sid    = "S3DbtWorkspace"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+        Resource = [
+          aws_s3_bucket.dbt.arn,
+          "${aws_s3_bucket.dbt.arn}/*",
+        ]
+      }
+    ]
+  })
 }
 
-resource "aws_iam_user_policy_attachment" "dbt_glue" {
-  user       = aws_iam_user.svc_dbt_athena.name
-  policy_arn = "arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess"
+# Enable zero-ingress SSM Session Manager access.
+resource "aws_iam_role_policy_attachment" "dbt_ssm" {
+  role       = aws_iam_role.dbt.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_user_policy_attachment" "dbt_s3" {
-  user       = aws_iam_user.svc_dbt_athena.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-}
-
-resource "aws_iam_access_key" "svc_dbt_athena_key" {
-  user = aws_iam_user.svc_dbt_athena.name
-}
-
-output "svc_dbt_access_key" {
-  value = aws_iam_access_key.svc_dbt_athena_key.id
-}
-
-output "svc_dbt_secret_key" {
-  value     = aws_iam_access_key.svc_dbt_athena_key.secret
-  sensitive = true
+resource "aws_iam_instance_profile" "dbt" {
+  name = "dbt_Athena_Access"
+  role = aws_iam_role.dbt.name
 }
 ```
 
-> After `terraform apply`, retrieve the secret: `terraform output -raw svc_dbt_secret_key`
-
 ### 15. dbt S3 Bucket and Glue Database
 
-Creates the dedicated S3 bucket that dbt uses for Athena query results (`results/`) and seed data (`data/`), plus the Glue database (`athena-dbt-db`) that dbt writes its models into. Keeping dbt outputs in a separate database from the raw star schema (`athena-db`) prevents dbt models from colliding with the Crawler-registered source tables. Corresponds to **Step 14 — Initialize the dbt Project** (the `s3_staging_dir`, `s3_data_dir`, and `schema` values in `profiles.yml` point at these resources).
-
 ```hcl
-resource "aws_s3_bucket" "dbt_bucket" {
-  bucket = "dbt-athena-<UNIQUE_SUFFIX>"
-  tags   = { Name = "dbt-athena-<UNIQUE_SUFFIX>" }
+resource "aws_s3_bucket" "dbt" {
+  bucket = "dbt-athena-${random_id.bucket_suffix.hex}"
+
+  tags = { Name = "dbt-athena-${random_id.bucket_suffix.hex}" }
 }
 
-resource "aws_s3_object" "dbt_results_folder" {
-  bucket = aws_s3_bucket.dbt_bucket.id
-  key    = "results/"
+resource "aws_s3_bucket_public_access_block" "dbt" {
+  bucket = aws_s3_bucket.dbt.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
-resource "aws_s3_object" "dbt_data_folder" {
-  bucket = aws_s3_bucket.dbt_bucket.id
-  key    = "data/"
+resource "aws_s3_bucket_server_side_encryption_configuration" "dbt" {
+  bucket = aws_s3_bucket.dbt.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+    bucket_key_enabled = true
+  }
 }
 
-resource "aws_glue_catalog_database" "dbt_db" {
-  name = "athena-dbt-db"
+# Glue database for dbt models. Use underscores — hyphens in Glue database names
+# force backtick/double-quote escaping in every Athena/dbt query.
+resource "aws_glue_catalog_database" "dbt" {
+  name = "athena_dbt_db"
 }
 ```
