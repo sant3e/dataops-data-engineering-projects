@@ -2,12 +2,14 @@ import json
 import csv
 import boto3
 import io
+import os
 from datetime import datetime, timezone
 
-S3_BUCKET       = "coingecko-etl-bucket"
-RAW_TO_PROCESS  = "raw_data/to_process/"
-RAW_PROCESSED   = "raw_data/processed/"
-TRANSFORMED     = "transformed_data/"
+# Bucket + prefixes read from env vars (set at deploy time by Terraform/CLI).
+S3_BUCKET       = os.environ.get("S3_BUCKET",      "coingecko-etl-bucket")
+RAW_TO_PROCESS  = os.environ.get("RAW_TO_PROCESS", "raw_data/to_process/")
+RAW_PROCESSED   = os.environ.get("RAW_PROCESSED",  "raw_data/processed/")
+TRANSFORMED     = os.environ.get("TRANSFORMED",    "transformed_data/")
 
 s3 = boto3.client("s3")
 

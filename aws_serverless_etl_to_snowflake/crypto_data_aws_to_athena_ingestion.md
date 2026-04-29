@@ -10,6 +10,26 @@
 
 ---
 
+## Before You Start — Placeholders and Conventions
+
+Every CLI and Terraform snippet in this walkthrough uses the placeholders in the table below. Substitute them with your own values before copy-pasting.
+
+| Placeholder | What it is | Example |
+|---|---|---|
+| `<ACCOUNT_ID>` | Your 12-digit AWS account ID | `123456789012` |
+| `<REGION>` | AWS region for every resource | `eu-north-1` |
+| `<AWS_PROFILE>` | Named AWS CLI profile to authenticate with | `aws-learn` |
+| `<PIPELINE_BUCKET>` | S3 bucket name (must be globally unique) | `coingecko-etl-bucket-td-42` |
+
+> **Values used in this walkthrough**
+> - **Region:** `eu-north-1` (literal throughout — replace if deploying elsewhere)
+> - **AWS profile:** `aws-learn`
+> - **Bucket name prefix:** `coingecko-etl-bucket` — append a unique suffix because S3 bucket names are globally unique.
+
+> **CLI conventions:** Every `aws` command in this guide should be suffixed with `--profile <AWS_PROFILE>` (e.g., `--profile aws-learn`). Management operations should also include `--query` or `--output` to avoid dumping unbounded JSON. For brevity, not every command below repeats these flags — add them when copy-pasting.
+
+---
+
 ## Data Flow
 
 This pipeline picks up where the [primary pipeline](./crypto_data_aws_to_snowpipe_ingestion.md) leaves off — CSVs already exist in S3. It replaces Snowflake + Snowpipe with AWS Glue Data Catalog + Amazon Athena; no data is copied or loaded, Athena reads S3 directly at query time.
@@ -139,7 +159,7 @@ Or via CLI:
 ```bash
 aws glue create-database \
   --database-input '{"Name":"coingecko_db","Description":"CoinGecko ETL tables (coin_data, market_data, price_data)"}' \
-  --region eu-west-2
+  --region eu-north-1
 ```
 
 This database will hold all three tables (`coin_data`, `market_data`, `price_data`).
@@ -153,7 +173,7 @@ Go to **AWS Glue → Data Catalog → Databases** and confirm `coingecko_db` app
 Or via CLI:
 
 ```bash
-aws glue get-database --name coingecko_db --region eu-west-2
+aws glue get-database --name coingecko_db --region eu-north-1
 ```
 
 ---
@@ -301,7 +321,7 @@ aws glue create-crawler \
     "DeleteBehavior": "DEPRECATE_IN_DATABASE"
   }' \
   --recrawl-policy '{ "RecrawlBehavior": "CRAWL_EVERYTHING" }' \
-  --region eu-west-2
+  --region eu-north-1
 ```
 
 > Terraform: [3. Glue Crawler](#3-glue-crawler)
@@ -319,14 +339,14 @@ Or via CLI:
 
 ```bash
 # Run the crawler
-aws glue start-crawler --name coingecko_data_crawler --region eu-west-2
+aws glue start-crawler --name coingecko_data_crawler --region eu-north-1
 
 # Poll status until it returns to READY
-aws glue get-crawler --name coingecko_data_crawler --region eu-west-2 \
+aws glue get-crawler --name coingecko_data_crawler --region eu-north-1 \
   --query 'Crawler.{State:State,LastCrawl:LastCrawl.Status}'
 
 # List tables created in the database
-aws glue get-tables --database-name coingecko_db --region eu-west-2 \
+aws glue get-tables --database-name coingecko_db --region eu-north-1 \
   --query 'TableList[].Name'
 ```
 
@@ -409,14 +429,14 @@ QID=$(aws athena start-query-execution \
   --query-string "SELECT * FROM coingecko_db.coin_data LIMIT 10" \
   --query-execution-context Database=coingecko_db \
   --result-configuration OutputLocation=s3://coingecko-etl-bucket/athena-results/ \
-  --region eu-west-2 \
+  --region eu-north-1 \
   --query 'QueryExecutionId' --output text)
 
 # Wait for completion and fetch results
-aws athena get-query-execution --query-execution-id "$QID" --region eu-west-2 \
+aws athena get-query-execution --query-execution-id "$QID" --region eu-north-1 \
   --query 'QueryExecution.Status.State'
 
-aws athena get-query-results --query-execution-id "$QID" --region eu-west-2
+aws athena get-query-results --query-execution-id "$QID" --region eu-north-1
 ```
 
 ---
@@ -445,9 +465,13 @@ CREATE EXTERNAL TABLE coingecko_db.coin_data (
   market_cap_tier  STRING,
   extracted_at     STRING
 )
-ROW FORMAT DELIMITED
-FIELDS TERMINATED BY ','
-LOCATION 's3://coingecko-etl-bucket/transformed_data/coin_data/'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ",",
+  "quoteChar" = "\"",
+  "escapeChar" = "\\"
+)
+LOCATION 's3://<PIPELINE_BUCKET>/transformed_data/coin_data/'
 TBLPROPERTIES ('skip.header.line.count'='1');
 ```
 
@@ -462,9 +486,13 @@ CREATE EXTERNAL TABLE coingecko_db.market_data (
   volume_to_mcap_ratio  STRING,
   extracted_at          STRING
 )
-ROW FORMAT DELIMITED
-FIELDS TERMINATED BY ','
-LOCATION 's3://coingecko-etl-bucket/transformed_data/market_data/'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ",",
+  "quoteChar" = "\"",
+  "escapeChar" = "\\"
+)
+LOCATION 's3://<PIPELINE_BUCKET>/transformed_data/market_data/'
 TBLPROPERTIES ('skip.header.line.count'='1');
 ```
 
@@ -485,9 +513,13 @@ CREATE EXTERNAL TABLE coingecko_db.price_data (
   last_updated                  STRING,
   extracted_at                  STRING
 )
-ROW FORMAT DELIMITED
-FIELDS TERMINATED BY ','
-LOCATION 's3://coingecko-etl-bucket/transformed_data/price_data/'
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  "separatorChar" = ",",
+  "quoteChar" = "\"",
+  "escapeChar" = "\\"
+)
+LOCATION 's3://<PIPELINE_BUCKET>/transformed_data/price_data/'
 TBLPROPERTIES ('skip.header.line.count'='1');
 ```
 
@@ -501,7 +533,7 @@ aws athena start-query-execution \
   --query-string "$(cat coin_data_ddl.sql)" \
   --query-execution-context Database=coingecko_db \
   --result-configuration OutputLocation=s3://coingecko-etl-bucket/athena-results/ \
-  --region eu-west-2
+  --region eu-north-1
 ```
 
 ### Verify Tables
@@ -515,7 +547,7 @@ After running all three DDL statements:
 Or via CLI:
 
 ```bash
-aws glue get-tables --database-name coingecko_db --region eu-west-2 \
+aws glue get-tables --database-name coingecko_db --region eu-north-1 \
   --query 'TableList[].{Name:Name,Columns:StorageDescriptor.Columns[].Name}'
 ```
 
@@ -544,7 +576,7 @@ aws athena update-work-group \
     },
     "EnforceWorkGroupConfiguration": true
   }' \
-  --region eu-west-2
+  --region eu-north-1
 ```
 
 ### Sample Queries
@@ -613,12 +645,61 @@ terraform {
 }
 
 provider "aws" {
-  region = "eu-west-2"   # London — must match the primary pipeline
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project = var.project_name
+      Owner   = var.owner_tag
+    }
+  }
 }
 
-# Look up the existing bucket created by the primary pipeline
+data "aws_caller_identity" "current" {}
+```
+
+### Variables
+
+```hcl
+variable "aws_region" {
+  description = "AWS region — must match the primary pipeline"
+  type        = string
+  default     = "eu-north-1"
+}
+
+variable "bucket_name" {
+  description = "Name of the pre-existing S3 bucket created by the primary pipeline"
+  type        = string
+  nullable    = false
+}
+
+variable "project_name" {
+  description = "Value for the Project tag"
+  type        = string
+  default     = "coingecko-etl"
+}
+
+variable "owner_tag" {
+  description = "Value for the Owner tag"
+  type        = string
+  default     = "coingecko-pipeline"
+}
+```
+
+Create a `terraform.tfvars`:
+
+```hcl
+bucket_name = "coingecko-etl-bucket-td-42"   # must match the primary pipeline
+```
+
+```hcl
+# Look up the existing bucket created by the primary pipeline.
+# Apply this module in a SEPARATE state from the primary pipeline's Terraform —
+# otherwise Terraform resolves `data` before `resource`, causing NoSuchBucket on
+# first apply. If you are managing everything in one root module, delete this
+# data source and reference the primary pipeline's `aws_s3_bucket.coingecko_pipeline` directly.
 data "aws_s3_bucket" "coingecko_pipeline" {
-  bucket = "coingecko-etl-bucket"   # Must match the primary pipeline's bucket name
+  bucket = var.bucket_name
 }
 ```
 
@@ -626,7 +707,7 @@ data "aws_s3_bucket" "coingecko_pipeline" {
 
 ### 1. IAM — Glue Crawler Role
 
-Role that allows the Glue Crawler to read S3 and write to the Data Catalog. Uses `glue.amazonaws.com` as the trusted service principal; attaches the managed `AWSGlueServiceRole` policy plus an inline policy for S3 read/write on the pipeline bucket.
+Role that allows the Glue Crawler to read S3 and write to the Data Catalog. Uses `glue.amazonaws.com` as the trusted service principal with an `aws:SourceAccount` condition for confused-deputy protection; attaches the managed `AWSGlueServiceRole` policy plus an inline policy scoped to the pipeline bucket.
 
 > **Console equivalent:** [Step 3.1 — IAM Role for Glue Crawler](#31--iam-role-for-glue-crawler)
 
@@ -640,8 +721,15 @@ resource "aws_iam_role" "glue_coingecko_role" {
       Effect    = "Allow"
       Principal = { Service = "glue.amazonaws.com" }
       Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+        }
+      }
     }]
   })
+
+  tags = { Purpose = "Glue Crawler execution role for CoinGecko pipeline" }
 }
 
 resource "aws_iam_role_policy_attachment" "glue_service_coingecko" {

@@ -1,10 +1,12 @@
 import json
 import boto3
+import os
 import urllib.request
 from datetime import datetime, timezone
 
-S3_BUCKET = "coingecko-etl-bucket"
-S3_PREFIX = "raw_data/to_process/"
+# Bucket + prefix read from env vars (set at deploy time by Terraform/CLI).
+S3_BUCKET = os.environ.get("S3_BUCKET", "coingecko-etl-bucket")
+S3_PREFIX = os.environ.get("S3_PREFIX", "raw_data/to_process/")
 
 
 def lambda_handler(event, context):
