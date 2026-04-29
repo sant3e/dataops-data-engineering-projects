@@ -1,20 +1,24 @@
 import json
 import boto3
 import base64
+import os
 import time
 from datetime import datetime, timezone
 
 # ──────────────────────────────────────────────
-# Configuration — adapted for our eu-west-2 deployment
+# Configuration — overridable via Lambda env vars
+# (AWS_REGION is a reserved Lambda env var; we read it but don't set it ourselves)
 # ──────────────────────────────────────────────
-logs_client = boto3.client("logs", region_name="eu-west-2")
-sns_client = boto3.client("sns", region_name="eu-west-2")
+AWS_REGION    = os.environ.get('AWS_REGION',    'eu-north-1')
+LOG_GROUP     = os.environ.get('LOG_GROUP',     '/aws/lambda/Logs_to_Cloud_Watch')
+LOG_STREAM    = os.environ.get('LOG_STREAM',    'AQI_Logs_Stream')
 
-LOG_GROUP = "/aws/lambda/Logs_to_Cloud_Watch"
-LOG_STREAM = "AQI_Logs_Stream"
+# SNS_TOPIC_ARN MUST be provided via Lambda env var (set at deploy time).
+# If missing, the publish step is skipped — the Lambda will still push to CloudWatch.
+SNS_TOPIC_ARN = os.environ.get('SNS_TOPIC_ARN')
 
-# ⚠️ Replace <ACCOUNT_ID> with your actual AWS account ID
-SNS_TOPIC_ARN = "arn:aws:sns:eu-west-2:<ACCOUNT_ID>:Records_SNS"
+logs_client = boto3.client("logs", region_name=AWS_REGION)
+sns_client  = boto3.client("sns",  region_name=AWS_REGION)
 
 
 def ensure_log_stream():
@@ -84,21 +88,28 @@ def lambda_handler(event, context):
                 sequenceToken=expected
             )
 
-    # Send SNS summary notification
-    message = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-        "records_received": record_count,
-        "log_group": LOG_GROUP,
-        "log_stream": LOG_STREAM
-    }
+    # Send SNS summary notification (only if topic ARN is configured)
+    if SNS_TOPIC_ARN:
+        message = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "records_received": record_count,
+            "log_group": LOG_GROUP,
+            "log_stream": LOG_STREAM
+        }
 
-    sns_client.publish(
-        TopicArn=SNS_TOPIC_ARN,
-        Subject="AQI Logs Update",
-        Message=json.dumps(message, indent=2)
-    )
+        try:
+            sns_client.publish(
+                TopicArn=SNS_TOPIC_ARN,
+                Subject="AQI Logs Update",
+                Message=json.dumps(message, indent=2)
+            )
+        except Exception as e:
+            print(f"SNS publish failed (non-fatal): {e}")
+    else:
+        print("SNS_TOPIC_ARN env var not set — skipping SNS publish")
 
     return {
         "statusCode": 200,
-        "body": f"Pushed {record_count} records to CloudWatch and sent SNS notification"
+        "body": f"Pushed {record_count} records to CloudWatch"
+                f"{' and sent SNS notification' if SNS_TOPIC_ARN else ''}"
     }

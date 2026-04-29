@@ -9,7 +9,7 @@ from io import StringIO
 S3_BUCKET = 'aqi-pipeline-bucket'
 S3_KEY_PATTERN = 'aqi_pipeline/source_data/openaq_location_'  # Pattern to match files
 KINESIS_STREAM = 'AQI_Stream'
-AWS_REGION = 'eu-west-2'  
+AWS_REGION = 'eu-north-1'  
 
 def get_aws_session():
     """Create AWS session with explicit credentials"""

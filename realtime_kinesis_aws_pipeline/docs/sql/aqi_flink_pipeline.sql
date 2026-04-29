@@ -28,7 +28,7 @@ CREATE TABLE air_quality_source (
 WITH (
   'connector' = 'kinesis',
   'stream' = 'AQI_Stream',
-  'aws.region' = 'eu-west-2',
+  'aws.region' = 'eu-north-1',
   'format' = 'json',
   'json.ignore-parse-errors' = 'true',
   'scan.stream.initpos' = 'TRIM_HORIZON'
@@ -57,7 +57,7 @@ CREATE TABLE aqi_s3_sink (
 )
 WITH (
   'connector' = 'filesystem',
-  'path' = 's3://analyticallayer/co-measurements/',
+  'path' = 's3://<PIPELINE_BUCKET>/aqi_pipeline/flink_output/co-measurements/',
   'format' = 'json',
   'sink.rolling-policy.file-size' = '1MB',
   'sink.rolling-policy.rollover-interval' = '30 s',
@@ -99,7 +99,7 @@ CREATE TABLE aqi_logs_sink (
 WITH (
   'connector' = 'kinesis',
   'stream' = 'AQI_Logs',
-  'aws.region' = 'eu-west-2',
+  'aws.region' = 'eu-north-1',
   'format' = 'json',
   'sink.partitioner' = 'random'
 );

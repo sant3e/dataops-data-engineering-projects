@@ -1,17 +1,19 @@
 import boto3
 import json
 import csv
+import os
 from datetime import datetime
 from botocore.exceptions import ClientError
 from io import StringIO
 
 # ──────────────────────────────────────────────
-# Configuration
+# Configuration — overridable via Lambda env vars
+# (AWS_REGION is a reserved Lambda env var; we read it but don't set it ourselves)
 # ──────────────────────────────────────────────
-S3_BUCKET = 'aqi-pipeline-bucket'  # Use for now: darshyl-snowflake-bucket
-S3_KEY_PREFIX = 'aqi_pipeline/source_data/openaq_location_'
-KINESIS_STREAM = 'AQI_Stream'
-AWS_REGION = 'eu-west-2'
+S3_BUCKET      = os.environ.get('S3_BUCKET',      'aqi-pipeline-bucket')
+S3_KEY_PREFIX  = os.environ.get('S3_KEY_PREFIX',  'aqi_pipeline/source_data/openaq_location_')
+KINESIS_STREAM = os.environ.get('KINESIS_STREAM', 'AQI_Stream')
+AWS_REGION     = os.environ.get('AWS_REGION',     'eu-north-1')
 
 s3 = boto3.client('s3', region_name=AWS_REGION)
 kinesis = boto3.client('kinesis', region_name=AWS_REGION)
@@ -72,9 +74,12 @@ def send_to_kinesis(records):
 
     for i, record in enumerate(records, 1):
         try:
+            # Append '\n' so Firehose output becomes NDJSON, which Athena's
+            # JsonSerDe parses correctly. Without it, records are concatenated
+            # JSON in each S3 file and Athena only sees the first.
             put_args = {
                 'StreamName': KINESIS_STREAM,
-                'Data': json.dumps(record),
+                'Data': json.dumps(record) + '\n',
                 'PartitionKey': record['location_id']
             }
             if sequence_number:

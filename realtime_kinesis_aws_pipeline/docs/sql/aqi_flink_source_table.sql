@@ -30,7 +30,7 @@ CREATE TABLE air_quality_with_watermark_1 (
 WITH (
   'connector' = 'kinesis',
   'stream' = 'AQI_Stream',
-  'aws.region' = 'us-east-1',
+  'aws.region' = 'eu-north-1',
   'format' = 'json',
   'json.ignore-parse-errors' = 'true',
   'scan.stream.initpos' = 'TRIM_HORIZON'
