@@ -2,11 +2,31 @@
 
 Step-by-step guide to build and run the whole project. For what each layer is and why it is built that way, read the [README](../README.md).
 
-You install only three things on your machine: **Docker**, **Ollama**, and (for the dataset upload) the **AWS CLI or the S3 console**. Airflow, dbt, Python and the Streamlit apps all run inside the Docker container. You do not need Python or dbt on your machine.
+You install only three things on your machine: **Git**, **Docker** and **Ollama**. You do the AWS and Snowflake work in the browser (AWS console and Snowsight). Airflow, dbt, Python and the Streamlit apps all run inside the Docker container. You do not need Python or dbt on your machine.
 
-**Order of work:** 1. Cloud setup → 2. Local LLM → 3. Docker → 4. Run and test → 5. Stop and reset.
+**Order of work:** 0. Get the project → 1. Cloud setup → 2. Local LLM → 3. Docker → 4. Run and test → 5. Stop and reset.
 
-> Run every `docker compose` command from the `airflow/` folder. `docker compose` looks for `docker-compose.yaml` in the current folder. If you see `no configuration file provided: not found`, you are in the wrong folder.
+> Run every `docker compose` command from the `airflow/` folder. `docker compose` looks for `docker-compose.yaml` in the current folder. If you see `no configuration file provided: not found`, you are in the wrong folder. Section 0 shows how to get there.
+
+---
+
+## 0 · Get the project
+
+The project is in the folder `zomato_analytics_with_ai/` of this repository. Open a terminal in a folder where you keep your projects, then run:
+
+```bash
+git clone https://github.com/sant3e/dataops-data-engineering-projects.git
+cd dataops-data-engineering-projects/zomato_analytics_with_ai
+ls
+```
+
+`ls` must show `ai`, `airflow`, `aws`, `docs`, `snowflake` and `zomato`. This folder is the **project folder**.
+
+Every `cd` command in this runbook starts from the folder in which you ran `git clone`. If you open a new terminal, go to that folder first. To go straight to the `airflow/` folder from there, run:
+
+```bash
+cd dataops-data-engineering-projects/zomato_analytics_with_ai/airflow
+```
 
 ---
 
@@ -16,17 +36,52 @@ You need an AWS account, a Snowflake account (a trial is enough) and a Snowsight
 
 ### 1.1 Get the data into S3
 
-1. Download the CSV files into `data/`. The download link is in the [README](../README.md).
+1. Download the CSV files into a `data/` folder inside the project folder. The download link is in the [README](../README.md).
 2. Create an S3 bucket, for example `zomato-dl-<yourname>`.
 3. Upload each CSV to its own folder: `raw/restaurants/`, `raw/users/`, `raw/food/`, `raw/menu/`, `raw/orders/`, `raw/order_items/`, `raw/reviews/`.
 
 ### 1.2 Create the AWS policy and role
 
-Use the JSON files in [`aws/iam/`](../aws/iam/). Replace `<BUCKET>` and `<ACCOUNT_ID>` first.
+Replace `<BUCKET>` with your bucket name and `<ACCOUNT_ID>` with your 12-digit AWS account ID in every JSON below. The same files are in [`aws/iam/`](../aws/iam/).
 
-1. Create the IAM policy `zomato-s3-read` from `s3-read-policy.json`.
-2. Create the IAM role `snowflake-zomato-role`. Use `snowflake-role-trust-policy-initial.json` as the trust policy, and attach the policy `zomato-s3-read`.
-3. Copy the role ARN: `arn:aws:iam::<ACCOUNT_ID>:role/snowflake-zomato-role`.
+**A. Create the IAM policy** (IAM console → Policies → Create policy → JSON tab). Name it `zomato-s3-read`. It gives read-only access to the bucket:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::<BUCKET>/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::<BUCKET>"
+    }
+  ]
+}
+```
+
+**B. Create the IAM role** (IAM console → Roles → Create role → Custom trust policy). Paste this **placeholder trust policy**. It only lets your own account assume the role for now:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_ID>:root" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+Attach the policy `zomato-s3-read`. Name the role `snowflake-zomato-role`.
+
+**C. Copy the role ARN:** `arn:aws:iam::<ACCOUNT_ID>:role/snowflake-zomato-role`. You need it in step 2 of section 1.3.
 
 ### 1.3 Create the Snowflake objects
 
@@ -37,14 +92,34 @@ In Snowsight, run the scripts in [`snowflake/`](../snowflake/) in this order, as
 | 1 | `01_setup.sql` | nothing |
 | 2 | `02_storage_integration.sql` | `<ROLE_ARN>` and `<BUCKET>` |
 | 3 | Run `DESC INTEGRATION ZOMATO_S3_INT;` | copy `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID` |
-| 4 | In AWS, edit the role trust policy | use `snowflake-role-trust-policy-final.json` with the two values from step 3 |
+| 4 | In AWS, edit the role trust policy | use the final trust policy below with the two values from step 3 |
 | 5 | `03_stage_and_formats.sql` | `<BUCKET>` |
 | 6 | `04_raw_tables.sql` | nothing |
 | 7 | `05_copy_into.sql` | nothing (optional, see below) |
 
-- Do not run `02_storage_integration.sql` again after step 4. The [README](../README.md#2--s3--snowflake-one-keyless-handshake) explains why.
+- Do not run `02_storage_integration.sql` again after step 4. `CREATE OR REPLACE STORAGE INTEGRATION` makes a new external ID, and the trust policy then stops working.
 - Step 7 is optional. The Airflow DAG runs the same `COPY INTO` commands.
 - `01_setup.sql` gives the role `DBT_ROLE` to the user that runs it. Use the same Snowflake user in the Docker `.env` file (section 3.2).
+
+**The final trust policy for step 4.** Open the role → Trust relationships → Edit trust policy. Replace the whole policy with this JSON. Use the two values from `DESC INTEGRATION` (step 3). `STORAGE_AWS_IAM_USER_ARN` replaces `<STORAGE_AWS_IAM_USER_ARN>`, and `STORAGE_AWS_EXTERNAL_ID` replaces `<STORAGE_AWS_EXTERNAL_ID>`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "<STORAGE_AWS_IAM_USER_ARN>" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "sts:ExternalId": "<STORAGE_AWS_EXTERNAL_ID>" }
+      }
+    }
+  ]
+}
+```
+
+The `Principal` must be the Snowflake IAM user ARN from step 3. It must not be your own account `:root`.
 
 **Check:** `LIST @ZOMATO.RAW.ZOMATO_RAW_STAGE;` shows the seven table folders.
 
@@ -98,7 +173,7 @@ The containers reach Ollama at `http://host.docker.internal:11434/v1`. This valu
 ### 3.2 Configure credentials
 
 ```bash
-cd airflow
+cd dataops-data-engineering-projects/zomato_analytics_with_ai/airflow
 cp example.env .env
 ```
 
@@ -142,7 +217,11 @@ The `dags/`, `zomato/` and `ai/` folders are mounted into the container. A chang
 
 ## 4 · Run and test everything (from the container)
 
-Run all commands in this section from the `airflow/` folder. Make sure that Ollama runs (section 2) and the containers run (section 3).
+Run all commands in this section from the `airflow/` folder. Make sure that Ollama runs (section 2) and the containers run (section 3). In a new terminal, go to the folder first, starting from the folder in which you ran `git clone`:
+
+```bash
+cd dataops-data-engineering-projects/zomato_analytics_with_ai/airflow
+```
 
 ### 4.1 The Airflow DAG
 
@@ -244,7 +323,7 @@ To reload the raw tables from the start, recreate them with `snowflake/04_raw_ta
 
 | Symptom | Cause and fix |
 |---|---|
-| `no configuration file provided: not found` | You are not in the `airflow/` folder. Run `cd airflow`. |
+| `no configuration file provided: not found` | You are not in the `airflow/` folder. Run `cd dataops-data-engineering-projects/zomato_analytics_with_ai/airflow` from the folder in which you ran `git clone`. |
 | `reload_raw` fails with `Insufficient privileges` on the stage | `DBT_ROLE` has no `USAGE` on the stage or file format. Run `03_stage_and_formats.sql` again, or the two `GRANT USAGE` lines at its end. |
 | `enrich_reviews` fails to connect to Ollama | Ollama does not run, or the model is missing. Repeat section 2.4. |
 | `Object ... does not exist or not authorized` in text-to-SQL | A dbt model did not build. Run the DAG, or `dbt build`, and check that the table exists in `ZOMATO.MARTS`. |
