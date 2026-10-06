@@ -23,3 +23,9 @@ End-to-end real-time pipeline that ingests NYC taxi ride data via Kafka, deliver
 Serverless medallion-architecture pipeline (Bronze/Silver/Gold) that ingests YouTube Trending data from Kaggle CSVs and the YouTube Data API, transforms it with Glue PySpark ETL, validates with a data-quality Lambda gate, and exposes aggregate analytics via Athena. Orchestrated by Step Functions with EventBridge Scheduler for a daily cron-based trigger.
 
 **Stack:** Python · Terraform · S3 · Lambda · Glue (Crawlers + PySpark ETL + DynamicFrames) · Athena · Step Functions · EventBridge Scheduler · SNS · Secrets Manager
+
+### [Zomato End-to-End Analytics with Local AI](zomato_analytics_with_ai/)
+End-to-end food delivery batch data pipeline from Amazon S3 to Snowflake via dbt medallion modeling, orchestrated daily with Airflow 3 on Docker, featuring local AI analytics powered by Ollama (`qwen2.5-coder:14b`) for review sentiment enrichment, text-to-SQL querying, and RAG chat.
+
+**Stack:** Python · Amazon S3 · Snowflake · dbt (dbt-snowflake) · Apache Airflow 3 (Docker) · Local Ollama (`qwen2.5-coder:14b`) · Streamlit
+
