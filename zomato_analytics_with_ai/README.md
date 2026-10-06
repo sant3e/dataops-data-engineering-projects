@@ -20,7 +20,7 @@ The dataset lands in an S3 data lake and flows into Snowflake through a storage 
 | **Lake** | Amazon S3 | One bucket, `raw/<table>/` folder per CSV |
 | **Bronze** | Snowflake `ZOMATO.RAW` | `COPY INTO` from S3 via a keyless storage integration |
 | **Silver** | Snowflake `ZOMATO.STAGING` | dbt staging views — clean, type, rename every source |
-| **Gold** | Snowflake `ZOMATO.MARTS` | Dimensions, **incremental** facts (MERGE), business marts + an SCD2 snapshot |
+| **Gold** | Snowflake `ZOMATO.MARTS` | Dimensions, **incremental** facts (MERGE), business marts |
 | **AI** | Snowflake `ZOMATO.AI` | LLM-enriched reviews (sentiment/topic), RAG chat, text-to-SQL |
 | **Orchestration** | Airflow (Docker) | One daily DAG: load → transform → enrich → AI mart |
 
@@ -52,7 +52,7 @@ Python · Pandas · Amazon S3 · Snowflake · dbt (dbt-snowflake) · Apache Airf
 │   ├── 04_raw_tables.sql     #   RAW (Bronze) table DDL, column order matches the CSVs
 │   └── 05_copy_into.sql      #   COPY INTO RAW from the stage
 ├── aws/iam/                  # IAM policy + role trust policies for the S3 ↔ Snowflake handshake
-└── docs/architecture.png     # architecture diagram
+└── docs/                     # RUNBOOK.md (step-by-step guide), architecture.png, project slides (.pptx)
 ```
 
 > `data/` (~2.3 GB of CSVs), logs, and dbt `target/` artifacts are intentionally not committed — get the dataset and slides from the [Google Drive folder](https://drive.google.com/drive/folders/1FEnGWMHhHzzTUCZOw1-YnH2v3DMuM-rs?usp=sharing).
@@ -70,7 +70,7 @@ Snowflake reads the bucket with **no stored keys**, using a storage integration 
 | File | Used for |
 |---|---|
 | [`s3-read-policy.json`](aws/iam/s3-read-policy.json) | IAM **policy** `zomato-s3-read` — read-only access to the bucket |
-| [`snowflake-role-trust-policy-initial.json`](aws/iam/snowflake-role-trust-policy-initial.json) | IAM **role** `snowflake-s3-role` — placeholder trust used at creation time |
+| [`snowflake-role-trust-policy-initial.json`](aws/iam/snowflake-role-trust-policy-initial.json) | IAM **role** `snowflake-zomato-role` — placeholder trust used at creation time |
 | [`snowflake-role-trust-policy-final.json`](aws/iam/snowflake-role-trust-policy-final.json) | Final trust — Snowflake's IAM user ARN + external ID from `DESC INTEGRATION` |
 
 The order matters: create the AWS policy + role → create the Snowflake `STORAGE INTEGRATION` pointing at the role ARN → `DESC INTEGRATION` to get `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID` → paste both into the role's trust policy. (Two hard-won lessons: the trust `Principal` must be Snowflake's IAM user ARN, not `:root` — and never re-run `CREATE OR REPLACE` on the integration afterward, it regenerates the external ID and breaks the trust.)
@@ -85,7 +85,7 @@ Table DDL ([`snowflake/04_raw_tables.sql`](snowflake/04_raw_tables.sql)) matches
 - **Dimensions (Gold)** — `dim_restaurants`, `dim_customer` (with age segments), `dim_food`, a generated `dim_date` calendar.
 - **Facts (Gold, incremental)** — `fct_orders` and `fact_order_items` use `materialized='incremental'` with a MERGE strategy, so a re-run processes only new rows instead of rebuilding 10M+.
 - **Marts (Gold)** — one table per business question: daily city revenue (GMV/AOV/cancel rate), restaurant performance, delivery SLA (p50/p90 by city & hour), review insights.
-- **Tests** — `unique` / `not_null` / `relationships` / `accepted_values` plus a singular reconciliation test; `dbt build` runs models and tests in dependency order.
+- **Tests** — `unique` / `not_null` / `relationships` / `accepted_values`; `dbt build` runs models and tests in dependency order.
 
 ### 5 · Orchestrate — Airflow
 
@@ -106,26 +106,4 @@ Credentials never touch the code: docker-compose injects `SNOWFLAKE_*` env vars 
 
 ## Running it
 
-```bash
-# Ensure Ollama is running locally
-ollama serve
-
-# Snowflake objects (warehouse ZOMATO_WH, database ZOMATO, schemas RAW/STAGING/MARTS/SNAPSHOTS/AI, role DBT_ROLE)
-# + the S3 storage integration: run snowflake/01→05 in Snowsight — see aws/iam/ for the AWS side.
-
-# dbt
-cd zomato
-export SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=...
-dbt debug && dbt build --exclude tag:ai
-
-# Airflow
-cd airflow
-cp example.env .env          # fill SNOWFLAKE_*
-docker compose build && docker compose up -d
-# http://localhost:8080 → un-pause zomato_batch → Trigger
-
-# AI apps
-python ai/enrich_reviews.py
-streamlit run ai/rag_chat.py      # chat with reviews
-streamlit run ai/text_to_sql.py   # chat with the warehouse
-```
+Follow the step-by-step [**Runbook**](docs/RUNBOOK.md): cloud setup, local LLM (Ollama), Docker, and how to run and test the DAG, the enrichment script, RAG and text-to-SQL — everything runs from the container.

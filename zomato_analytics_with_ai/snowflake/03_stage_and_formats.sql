@@ -29,3 +29,7 @@ CREATE OR REPLACE STAGE ZOMATO.RAW.ZOMATO_RAW_STAGE
 
 -- Confirm Snowflake can see your files (should list the seven table folders).
 LIST @ZOMATO.RAW.ZOMATO_RAW_STAGE;
+
+-- DBT_ROLE (Airflow COPY task) must be able to use the stage and file format.
+GRANT USAGE ON FILE FORMAT ZOMATO.RAW.CSV_FMT       TO ROLE DBT_ROLE;
+GRANT USAGE ON STAGE       ZOMATO.RAW.ZOMATO_RAW_STAGE TO ROLE DBT_ROLE;

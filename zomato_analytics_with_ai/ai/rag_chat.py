@@ -12,7 +12,7 @@ BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:14b")
 
 NEW_REVIEWS = 500
-TOK_K = 5
+TOP_K = 5
 CACHE_FILE = "review_embeddings.parquet"
 
 client = OpenAI(base_url=BASE_URL, api_key="ollama")
@@ -88,7 +88,7 @@ def find_similar_reviews(question, df):
 
     df = df.copy()
     df['score'] = scores
-    return df.nlargest(TOK_K, 'score')
+    return df.nlargest(TOP_K, 'score')
 
 def ask_llm(question, top_reviews):
     context = ""

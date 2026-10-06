@@ -40,13 +40,14 @@ def get_connection():
         warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
         database=os.getenv("SNOWFLAKE_DATABASE"),
         schema=os.getenv("SNOWFLAKE_SCHEMA"),
+        role=os.getenv("SNOWFLAKE_ROLE", "DBT_ROLE"),
     )
 
 def create_output_table(cursor):
     cursor.execute("CREATE SCHEMA IF NOT EXISTS ZOMATO.AI")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ZOMATO.AI.REVIEW_ENRICHED (
-            REVIEW_ID STRING,
+            REVIEW_ID NUMBER,
             SENTIMENT_LABEL STRING,
             SENTIMENT_SCORE FLOAT,
             TOPIC STRING,
@@ -60,7 +61,8 @@ def get_reviews_to_enrich(cursor):
     cursor.execute(f"""
         SELECT REVIEW_ID, COMMENT
         FROM ZOMATO.RAW.REVIEWS
-        WHERE REVIEW_ID NOT IN (SELECT REVIEW_ID FROM ZOMATO.AI.REVIEW_ENRICHED)
+        WHERE COMMENT IS NOT NULL
+          AND REVIEW_ID NOT IN (SELECT REVIEW_ID FROM ZOMATO.AI.REVIEW_ENRICHED)
         LIMIT {SAMPLE_N}
     """)
     return cursor.fetchall()
@@ -119,6 +121,10 @@ def main():
             ))
         except Exception as e:
             print(f"Error occurred while classifying review {review_id}: {e}")
+
+    if not results:
+        print("No reviews were classified, nothing to save.")
+        return
 
     save_results(cursor, results)
     print(f"Saved {len(results)} enriched reviews to Snowflake.")

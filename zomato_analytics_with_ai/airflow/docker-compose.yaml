@@ -1,7 +1,7 @@
 # Local Airflow 3.x (LocalExecutor) on Docker.
 # Airflow 3 differences vs 2.x: webserver -> api-server, a separate dag-processor,
 # and the FAB auth manager for classic admin/admin login.
-#   cp .env.example .env   # fill creds
+#   cp example.env .env   # fill creds
 #   docker compose build && docker compose up -d   # UI: http://localhost:8080 (admin/admin)
 x-airflow-common: &airflow-common
   build: .
@@ -20,6 +20,10 @@ x-airflow-common: &airflow-common
     SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
     SNOWFLAKE_USER: ${SNOWFLAKE_USER}
     SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+    SNOWFLAKE_WAREHOUSE: ZOMATO_WH
+    SNOWFLAKE_DATABASE: ZOMATO
+    SNOWFLAKE_SCHEMA: RAW
+    SNOWFLAKE_ROLE: DBT_ROLE
     OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
     OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:14b}
     SAMPLE_N: ${SAMPLE_N:-5}
@@ -68,6 +72,7 @@ services:
   scheduler:
     <<: *airflow-common
     command: scheduler
+    ports: ["8501:8501"]           # Streamlit apps (rag_chat, text_to_sql)
     restart: always
     depends_on:
       airflow-init:

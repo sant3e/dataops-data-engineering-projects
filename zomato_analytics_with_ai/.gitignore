@@ -5,7 +5,6 @@
 .env
 *.env
 !example.env
-zomato/profiles.yml
 
 # Raw data (too large for GitHub)
 data/

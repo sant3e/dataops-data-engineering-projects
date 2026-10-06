@@ -1,0 +1,5 @@
+[server]
+fileWatcherType = "none"     # no hot-reload in Docker — silences torchvision/transformers noise
+
+[browser]
+gatherUsageStats = false     # disable telemetry
